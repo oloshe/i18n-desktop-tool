@@ -68,10 +68,13 @@ export function generateLocales(
         throw new Error(`Excel 缺少语言列 "${column}"。`);
       }
 
+      const rawValue = row[column]?.trim() ?? "";
+      if (!rawValue) return;
+
       const { moduleName: rawOutputModuleName, localeKey } = splitModule(rawKey, moduleSplitMode, moduleNameSource, sectionModuleName);
       const moduleName = rawOutputModuleName ? normalizeModuleName(rawOutputModuleName, options.moduleNameReplacements) : rawOutputModuleName;
       const bucket = locales[lang][moduleName] ?? {};
-      const value = transformLocaleValue(row[column] ?? "", lang, options);
+      const value = transformLocaleValue(rawValue, lang, options);
       const inserted = setLocaleValue(bucket, localeKey, value, options.keyStyle);
       if (!inserted) {
         throw new Error(`Excel 第 ${index + 2} 行出现重复 key "${rawKey}"。`);

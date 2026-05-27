@@ -31,6 +31,27 @@ describe("localeGenerator", () => {
     });
   });
 
+  it("skips empty language cells so fallback languages can resolve missing keys", () => {
+    const rows = [
+      { key: "room-mic-new-users-after-owner", cn: "房主之后的新用户", en: "" },
+      { key: "follow-anchors", cn: "关注主播", en: "Follow anchors" }
+    ];
+
+    expect(generateLocales(rows, "key", { "zh-CN": "cn", "en-US": "en" }, { splitByModule: false, keyStyle: "nested" })).toEqual({
+      "zh-CN": {
+        "": {
+          "room-mic-new-users-after-owner": "房主之后的新用户",
+          "follow-anchors": "关注主播"
+        }
+      },
+      "en-US": {
+        "": {
+          "follow-anchors": "Follow anchors"
+        }
+      }
+    });
+  });
+
   it("generates module split locale objects", () => {
     const rows = [{ key: "votings.tasks.other-room-stay-time", cn: "停留时间" }];
 
