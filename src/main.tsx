@@ -1,5 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
+import {
+  Alert,
+  Box,
+  Button,
+  ButtonBase,
+  Checkbox,
+  CircularProgress,
+  CssBaseline,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  MenuItem,
+  Paper,
+  Stack,
+  TextField,
+  ThemeProvider,
+  Typography,
+  createTheme
+} from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -34,6 +55,17 @@ const DEFAULT_LANGUAGE_COLUMNS: LanguageColumns = {
   "zh-CN": "中文",
   "en-US": "英文"
 };
+
+const theme = createTheme({
+  palette: {
+    primary: { main: "#006a6a" },
+    secondary: { main: "#6750a4" },
+    background: { default: "#f7f8fb", paper: "#ffffff" }
+  },
+  shape: {
+    borderRadius: 8
+  }
+});
 
 type StatusKind = "idle" | "reading" | "previewing" | "importing";
 type DiffLine = { kind: "same" | "added" | "removed"; prefix: string; text: string };
@@ -557,222 +589,237 @@ function App() {
 
   return (
     <main className="shell" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
-      <nav className="menuBar">
-        <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="配置名称" />
-        <button onClick={saveConfig}>保存配置</button>
-        <select value={selectedConfigId} onChange={(event) => loadConfig(event.target.value)}>
-          <option value="">读取项目配置</option>
+      <Box component="nav" className="menuBar">
+        <TextField
+          label="配置名称"
+          value={projectName}
+          onChange={(event) => setProjectName(event.target.value)}
+          size="small"
+        />
+        <Button onClick={saveConfig} variant="outlined">保存配置</Button>
+        <TextField
+          label="读取项目配置"
+          value={selectedConfigId}
+          onChange={(event) => loadConfig(event.target.value)}
+          select
+          size="small"
+        >
+          <MenuItem value="">读取项目配置</MenuItem>
           {configs.map((config) => (
-            <option key={config.id} value={config.id}>{config.projectName}</option>
+            <MenuItem key={config.id} value={config.id}>{config.projectName}</MenuItem>
           ))}
-        </select>
-        <button onClick={importConfig}>导入配置</button>
-        <button onClick={exportConfig}>导出配置</button>
-        <button onClick={copyConfig}>复制配置</button>
-        <button onClick={deleteConfig} disabled={!selectedConfigId}>删除配置</button>
-      </nav>
+        </TextField>
+        <Button onClick={importConfig} variant="outlined">导入配置</Button>
+        <Button onClick={exportConfig} variant="outlined">导出配置</Button>
+        <Button onClick={copyConfig} variant="outlined">复制配置</Button>
+        <Button onClick={deleteConfig} disabled={!selectedConfigId} color="error" variant="outlined">删除配置</Button>
+      </Box>
       <header className="topbar">
         <div>
-          <h1>多语言导入工具</h1>
-          <p>从 Excel 生成并合并项目 locale 文件</p>
+          <Typography component="h1" variant="h4">多语言导入工具</Typography>
+          <Typography color="text.secondary">从 Excel 生成并合并项目 locale 文件</Typography>
         </div>
-        <div className="actions">
-          <button onClick={buildPreviewPlans} disabled={isWorking}>生成预览</button>
-          <button className="primary" onClick={runImport} disabled={isWorking}>执行导入</button>
-        </div>
+        <Stack className="actions" direction="row" spacing={1}>
+          <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">生成预览</Button>
+          <Button onClick={runImport} disabled={isWorking} variant="contained">执行导入</Button>
+        </Stack>
       </header>
 
-      {message && <div className="notice">{message}</div>}
+      {message && <Alert className="notice" severity="info">{message}</Alert>}
 
       <section className="grid">
         <div className="setupArea">
           <div className="setupLeft">
-            <div className="panel">
-          <h2>1. 文件</h2>
-          <label>
-            Excel 文件
-            <div className="inline">
-              <input value={excelPath} readOnly placeholder="选择或拖入 .xlsx / .xls 文件" />
-              <button onClick={chooseExcelFile} disabled={isWorking}>选择</button>
-            </div>
-          </label>
-          <label>
-            项目目录
-            <div className="inline">
-              <input value={projectRoot} readOnly placeholder="选择写入的项目根目录" />
-              <button onClick={chooseProjectRoot}>选择</button>
-            </div>
-          </label>
-            </div>
+            <Paper className="panel" variant="outlined">
+              <Typography component="h2" variant="h6">文件</Typography>
+              <Stack spacing={1.5}>
+                <Stack className="inline" direction="row" spacing={1}>
+                  <TextField
+                    label="Excel 文件"
+                    value={excelPath}
+                    placeholder="选择或拖入 .xlsx / .xls 文件"
+                    slotProps={{ input: { readOnly: true } }}
+                    size="small"
+                    fullWidth
+                  />
+                  <Button onClick={chooseExcelFile} disabled={isWorking} variant="outlined">选择</Button>
+                </Stack>
+                <Stack className="inline" direction="row" spacing={1}>
+                  <TextField
+                    label="项目目录"
+                    value={projectRoot}
+                    placeholder="选择写入的项目根目录"
+                    slotProps={{ input: { readOnly: true } }}
+                    size="small"
+                    fullWidth
+                  />
+                  <Button onClick={chooseProjectRoot} variant="outlined">选择</Button>
+                </Stack>
+              </Stack>
+            </Paper>
 
-            <div className="panel">
-          <h2>2. Excel 设置</h2>
-          <label>
-            Sheet
-            <select value={sheetName} onChange={(event) => setSheetName(event.target.value)} disabled={!preview}>
-              {preview?.sheetNames.map((name) => (
-                <option key={name} value={name}>{name}</option>
-              ))}
-            </select>
-          </label>
-          <div className="split">
-            <label>
-              跳过前 n 行
-              <input type="number" min={0} value={skipRows} onChange={(event) => setSkipRows(Number(event.target.value))} />
-            </label>
-            <label>
-              表头行
-              <input type="number" min={1} value={headerRow} onChange={(event) => setHeaderRow(Number(event.target.value))} />
-            </label>
-          </div>
-            </div>
+            <Paper className="panel" variant="outlined">
+              <Typography component="h2" variant="h6">Excel 设置</Typography>
+              <TextField
+                label="Sheet"
+                value={sheetName}
+                onChange={(event) => setSheetName(event.target.value)}
+                disabled={!preview}
+                select
+                size="small"
+                fullWidth
+              >
+                {preview?.sheetNames.map((name) => (
+                  <MenuItem key={name} value={name}>{name}</MenuItem>
+                ))}
+              </TextField>
+              <Stack className="split" direction="row" spacing={1}>
+                <TextField
+                  label="跳过前 n 行"
+                  type="number"
+                  value={skipRows}
+                  onChange={(event) => setSkipRows(Number(event.target.value))}
+                  slotProps={{ htmlInput: { min: 0 } }}
+                  size="small"
+                  fullWidth
+                />
+                <TextField
+                  label="表头行"
+                  type="number"
+                  value={headerRow}
+                  onChange={(event) => setHeaderRow(Number(event.target.value))}
+                  slotProps={{ htmlInput: { min: 1 } }}
+                  size="small"
+                  fullWidth
+                />
+              </Stack>
+            </Paper>
 
-            <div className="panel languagePanel">
+            <Paper className="panel languagePanel" variant="outlined">
               <div className="panelHead">
-                <h2>4. 语言列映射</h2>
-                <button onClick={addLanguageRow}>添加语言</button>
+                <Typography component="h2" variant="h6">语言列映射</Typography>
+                <Button onClick={addLanguageRow} variant="outlined">添加语言</Button>
               </div>
               <div className="languageRows">
                 {Object.entries(languageColumns).map(([lang, column], index) => (
                   <div className="languageRow" key={index}>
-                    <input value={lang} onChange={(event) => updateLanguage(index, "lang", event.target.value)} placeholder="zh-CN" />
+                    <TextField
+                      label="语言"
+                      value={lang}
+                      onChange={(event) => updateLanguage(index, "lang", event.target.value)}
+                      placeholder="zh-CN"
+                      size="small"
+                    />
                     <span>{"->"}</span>
-                    <select value={column} onChange={(event) => updateLanguage(index, "column", event.target.value)}>
-                      <option value="">选择 Excel 列</option>
+                    <TextField
+                      label="Excel 列"
+                      value={column}
+                      onChange={(event) => updateLanguage(index, "column", event.target.value)}
+                      select
+                      size="small"
+                    >
+                      <MenuItem value="">选择 Excel 列</MenuItem>
                       {preview?.headers.map((header) => (
-                        <option key={header} value={header}>{header}</option>
+                        <MenuItem key={header} value={header}>{header}</MenuItem>
                       ))}
-                      {!preview?.headers.includes(column) && column && <option value={column}>{column}</option>}
-                    </select>
-                    <button onClick={() => removeLanguageRow(index)}>删除</button>
+                      {!preview?.headers.includes(column) && column && <MenuItem value={column}>{column}</MenuItem>}
+                    </TextField>
+                    <Button onClick={() => removeLanguageRow(index)} color="error" variant="text">删除</Button>
                   </div>
                 ))}
               </div>
-            </div>
+            </Paper>
           </div>
 
           <div className="setupRight">
-            <div className="panel configPanel">
-          <h2>3. 导入配置</h2>
-          <label>
-            key 列
-            <select value={keyColumn} onChange={(event) => setKeyColumn(event.target.value)}>
-              <option value={keyColumn}>{keyColumn}</option>
-              {preview?.headers.filter((header) => header !== keyColumn).map((header) => (
-                <option key={header} value={header}>{header}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            输出路径模板
-            <input value={outputPathTemplate} onChange={(event) => setOutputPathTemplate(event.target.value)} />
-            <span className="hint">可用变量：{"{lang}"}、{"{module}"}，例如 {"{lang}/{module}.json"}</span>
-          </label>
-          <div className="split">
-            <label>
-              输出格式
-              <select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)}>
-                <option value="json">json</option>
-                <option value="js">js</option>
-                <option value="ts">ts</option>
-              </select>
-            </label>
-            <label>
-              合并策略
-              <select value={mergeStrategy} onChange={(event) => setMergeStrategy(event.target.value as MergeStrategy)}>
-                <option value="overwrite">覆盖已有 key</option>
-                <option value="skip">跳过已有 key</option>
-              </select>
-            </label>
-            <label>
-              Excel 不存在的 key
-              <select value={missingKeyStrategy} onChange={(event) => setMissingKeyStrategy(event.target.value as MissingKeyStrategy)}>
-                <option value="keep">保留</option>
-                <option value="remove">删除</option>
-              </select>
-            </label>
-          </div>
-          <div className="split">
-            <label>
-              key 风格
-              <select value={keyStyle} onChange={(event) => setKeyStyle(event.target.value as KeyStyle)}>
-                <option value="nested">nested key</option>
-                <option value="flat">平铺 key</option>
-              </select>
-            </label>
-            <label>
-              模块划分
-              <select value={moduleSplitMode} onChange={(event) => setModuleSplitMode(event.target.value as ModuleSplitMode)}>
-                <option value="none">不划分</option>
-                <option value="keyPrefix">按 key 第一段</option>
-                <option value="sectionRow">无前缀模块行</option>
-              </select>
-            </label>
-            <label>
-              模块名来源
-              <select value={moduleNameSource} onChange={(event) => setModuleNameSource(event.target.value as ModuleNameSource)}>
-                <option value="keyPrefix">按 key 第一段</option>
-                <option value="sectionRow">按模块行</option>
-              </select>
-            </label>
-          </div>
-          <label>
-            只导入模块
-            <input value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value)} placeholder="例如：base, agency；留空则全部导入" />
-          </label>
-          <label>
-            忽略模块
-            <input value={ignoredModuleFilter} onChange={(event) => setIgnoredModuleFilter(event.target.value)} placeholder="例如：debug, deprecated" />
-          </label>
-          <label>
-            模块名替换
-            <textarea
-              value={moduleNameReplacements}
-              onChange={(event) => setModuleNameReplacements(event.target.value)}
-              placeholder="例如：大胃王=gachaguess，每行一个"
-              rows={3}
-            />
-          </label>
-          <label className="checkboxLabel">
-            <input
-              type="checkbox"
-              checked={removeModulePrefix}
-              onChange={(event) => setRemoveModulePrefix(event.target.checked)}
-            />
-            移除模块前缀
-          </label>
-          <label className="checkboxLabel">
-            <input
-              type="checkbox"
-              checked={quoteObjectProperties}
-              onChange={(event) => setQuoteObjectProperties(event.target.checked)}
-              disabled={outputFormat === "json"}
-            />
-            JS/TS 属性名使用双引号
-          </label>
-          <label>
-            两边加空格语言
-            <input
-              value={spaceWrappedLanguages}
-              onChange={(event) => setSpaceWrappedLanguages(event.target.value)}
-              placeholder="例如：ar, ur；留空则不处理"
-            />
-            <span className="hint">适用于 Cocos 阿语/乌尔都语等需要文本左右空格的项目。</span>
-          </label>
-          <label className="checkboxLabel">
-            <input
-              type="checkbox"
-              checked={ensureTrailingNewline}
-              onChange={(event) => setEnsureTrailingNewline(event.target.checked)}
-            />
-            文件末尾保留空行
-          </label>
-            </div>
+            <Paper className="panel configPanel" variant="outlined">
+              <Typography component="h2" variant="h6">导入配置</Typography>
+              <TextField label="key 列" value={keyColumn} onChange={(event) => setKeyColumn(event.target.value)} select size="small">
+                <MenuItem value={keyColumn}>{keyColumn}</MenuItem>
+                {preview?.headers.filter((header) => header !== keyColumn).map((header) => (
+                  <MenuItem key={header} value={header}>{header}</MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                label="输出路径模板"
+                value={outputPathTemplate}
+                onChange={(event) => setOutputPathTemplate(event.target.value)}
+                helperText={`可用变量：{lang}、{module}，例如 {lang}/{module}.json`}
+                size="small"
+              />
+              <Stack className="split" direction="row" spacing={1}>
+                <TextField label="输出格式" value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)} select size="small" fullWidth>
+                  <MenuItem value="json">json</MenuItem>
+                  <MenuItem value="js">js</MenuItem>
+                  <MenuItem value="ts">ts</MenuItem>
+                </TextField>
+                <TextField label="合并策略" value={mergeStrategy} onChange={(event) => setMergeStrategy(event.target.value as MergeStrategy)} select size="small" fullWidth>
+                  <MenuItem value="overwrite">覆盖已有 key</MenuItem>
+                  <MenuItem value="skip">跳过已有 key</MenuItem>
+                </TextField>
+                <TextField label="Excel 不存在的 key" value={missingKeyStrategy} onChange={(event) => setMissingKeyStrategy(event.target.value as MissingKeyStrategy)} select size="small" fullWidth>
+                  <MenuItem value="keep">保留</MenuItem>
+                  <MenuItem value="remove">删除</MenuItem>
+                </TextField>
+              </Stack>
+              <Stack className="split" direction="row" spacing={1}>
+                <TextField label="key 风格" value={keyStyle} onChange={(event) => setKeyStyle(event.target.value as KeyStyle)} select size="small" fullWidth>
+                  <MenuItem value="nested">nested key</MenuItem>
+                  <MenuItem value="flat">平铺 key</MenuItem>
+                </TextField>
+                <TextField label="模块划分" value={moduleSplitMode} onChange={(event) => setModuleSplitMode(event.target.value as ModuleSplitMode)} select size="small" fullWidth>
+                  <MenuItem value="none">不划分</MenuItem>
+                  <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
+                  <MenuItem value="sectionRow">无前缀模块行</MenuItem>
+                </TextField>
+                <TextField label="模块名来源" value={moduleNameSource} onChange={(event) => setModuleNameSource(event.target.value as ModuleNameSource)} select size="small" fullWidth>
+                  <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
+                  <MenuItem value="sectionRow">按模块行</MenuItem>
+                </TextField>
+              </Stack>
+              <TextField label="只导入模块" value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value)} placeholder="例如：base, agency；留空则全部导入" size="small" />
+              <TextField label="忽略模块" value={ignoredModuleFilter} onChange={(event) => setIgnoredModuleFilter(event.target.value)} placeholder="例如：debug, deprecated" size="small" />
+              <TextField
+                label="模块名替换"
+                value={moduleNameReplacements}
+                onChange={(event) => setModuleNameReplacements(event.target.value)}
+                placeholder="例如：大胃王=gachaguess，每行一个"
+                multiline
+                minRows={3}
+                size="small"
+              />
+              <FormControlLabel
+                control={<Checkbox checked={removeModulePrefix} onChange={(event) => setRemoveModulePrefix(event.target.checked)} />}
+                label="移除模块前缀"
+              />
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={quoteObjectProperties}
+                    onChange={(event) => setQuoteObjectProperties(event.target.checked)}
+                    disabled={outputFormat === "json"}
+                  />
+                }
+                label="JS/TS 属性名使用双引号"
+              />
+              <TextField
+                label="两边加空格语言"
+                value={spaceWrappedLanguages}
+                onChange={(event) => setSpaceWrappedLanguages(event.target.value)}
+                placeholder="例如：ar, ur；留空则不处理"
+                helperText="适用于 Cocos 阿语/乌尔都语等需要文本左右空格的项目。"
+                size="small"
+              />
+              <FormControlLabel
+                control={<Checkbox checked={ensureTrailingNewline} onChange={(event) => setEnsureTrailingNewline(event.target.checked)} />}
+                label="文件末尾保留空行"
+              />
+            </Paper>
           </div>
         </div>
 
-        <div className="panel wide">
-          <h2>5. Excel 预览</h2>
+        <Paper className="panel wide" variant="outlined">
+          <Typography component="h2" variant="h6">Excel 预览</Typography>
           {preview && preview.headers.length > 0 ? (
             <div className="tableWrap">
               <div className="meta">
@@ -795,20 +842,20 @@ function App() {
               </table>
             </div>
           ) : (
-            <p className="empty">选择或拖入 Excel 后展示对应 sheet 的前 20 行有效数据。</p>
+            <Typography className="empty" color="text.secondary">选择或拖入 Excel 后展示对应 sheet 的前 20 行有效数据。</Typography>
           )}
-        </div>
+        </Paper>
 
-        <div className="panel wide previewPanel">
+        <Paper className="panel wide previewPanel" variant="outlined">
           <div className="panelHead">
-            <h2>6. 写入预览</h2>
-            <button onClick={buildPreviewPlans} disabled={isWorking}>刷新预览</button>
+            <Typography component="h2" variant="h6">写入预览</Typography>
+            <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">刷新预览</Button>
           </div>
           {plans.length > 0 ? (
             <div className="previewSplit">
               <div className="planList scrollList">
                 {plans.map((plan) => (
-                  <button
+                  <ButtonBase
                     className={`plan ${selectedPlan?.path === plan.path ? "selectedPlan" : ""}`}
                     key={`${plan.lang}-${plan.path}`}
                     onClick={() => scrollToPlan(plan.path)}
@@ -822,7 +869,7 @@ function App() {
                         新增 {plan.addedKeys.length} · 修改 {plan.overwrittenKeys.length} · 删除 {plan.deletedKeys.length} · 跳过 {plan.skippedKeys.length} · {plan.eol.toUpperCase()}
                       </span>
                     )}
-                  </button>
+                  </ButtonBase>
                 ))}
               </div>
               <div className="diffPanel" ref={diffScrollerRef} onScroll={handleDiffScroll}>
@@ -848,16 +895,18 @@ function App() {
                         ))}
                       </pre>
                     ) : (
-                      <p className="empty">没有内容变化。</p>
+                      <Typography className="empty" color="text.secondary">没有内容变化。</Typography>
                     )}
                   </section>
                 ))}
               </div>
             </div>
           ) : (
-            <p className="empty">生成预览后会展示将修改的文件、key 数量和完整 diff。</p>
+            <Box className="previewEmpty">
+              <Typography color="text.secondary">生成预览后会展示将修改的文件、key 数量和完整 diff。</Typography>
+            </Box>
           )}
-        </div>
+        </Paper>
       </section>
 
       <StatusBar status={status} plans={plans.length} previewRows={preview?.rows.length ?? 0} />
@@ -899,23 +948,23 @@ function OperationDialog({ status }: { status: StatusKind }) {
         : "正在把预览中的变更写入项目。";
 
   return (
-    <div className="modalScrim" role="status" aria-live="polite">
-      <div className="materialDialog compactDialog">
-        <div className="progressRing" />
-        <div>
-          <h2>{title}</h2>
-          <p>{detail}</p>
-        </div>
-      </div>
-    </div>
+    <Dialog open aria-live="polite" aria-labelledby="operation-dialog-title">
+      <DialogContent className="compactDialog">
+        <CircularProgress size={42} />
+        <Box>
+          <DialogTitle id="operation-dialog-title" sx={{ p: 0, mb: 1 }}>{title}</DialogTitle>
+          <Typography color="text.secondary">{detail}</Typography>
+        </Box>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function ImportSummaryDialog({ summary, onClose }: { summary: ImportSummary; onClose: () => void }) {
   return (
-    <div className="modalScrim">
-      <div className="materialDialog summaryDialog" role="dialog" aria-modal="true" aria-labelledby="import-summary-title">
-        <h2 id="import-summary-title">导入成功，修改了 {summary.changedFiles} 个文件</h2>
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth aria-labelledby="import-summary-title">
+      <DialogTitle id="import-summary-title">导入成功，修改了 {summary.changedFiles} 个文件</DialogTitle>
+      <DialogContent>
         <div className="summaryList">
           {summary.lines.map((line, index) => (
             <div className="summaryRow" key={`${line.lang}-${line.moduleName}-${index}`}>
@@ -925,11 +974,11 @@ function ImportSummaryDialog({ summary, onClose }: { summary: ImportSummary; onC
             </div>
           ))}
         </div>
-        <div className="dialogActions">
-          <button className="primary" onClick={onClose}>完成</button>
-        </div>
-      </div>
-    </div>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} variant="contained">完成</Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
@@ -1051,6 +1100,9 @@ function readExcelRows(source: ExcelSource, options: ExcelReadOptions): Promise<
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <App />
+    </ThemeProvider>
   </React.StrictMode>
 );

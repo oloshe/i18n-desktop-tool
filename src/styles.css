@@ -1,17 +1,7 @@
 :root {
   font-family: Roboto, "Segoe UI", system-ui, sans-serif;
   color: #1d1b20;
-  background: #fef7ff;
-  --md-primary: #006a6a;
-  --md-on-primary: #ffffff;
-  --md-primary-container: #9cf1f0;
-  --md-secondary: #6750a4;
-  --md-surface: #fffbfe;
-  --md-surface-container: #f3edf7;
-  --md-outline: #79747e;
-  --md-outline-variant: #cac4d0;
-  --md-error: #b3261e;
-  --md-shadow: 0 2px 6px rgba(29, 27, 32, 0.16), 0 1px 2px rgba(29, 27, 32, 0.12);
+  background: #f7f8fb;
 }
 
 * {
@@ -20,96 +10,6 @@
 
 body {
   margin: 0;
-}
-
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
-
-button {
-  border: 1px solid var(--md-outline);
-  background: transparent;
-  border-radius: 20px;
-  color: var(--md-primary);
-  cursor: pointer;
-  min-height: 40px;
-  padding: 8px 16px;
-  transition: background-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-button:hover:not(:disabled) {
-  background: rgba(0, 106, 106, 0.08);
-  box-shadow: var(--md-shadow);
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-button.primary {
-  border-color: var(--md-primary);
-  background: var(--md-primary);
-  color: var(--md-on-primary);
-}
-
-input,
-textarea,
-select {
-  width: 100%;
-  min-height: 44px;
-  border: 1px solid var(--md-outline);
-  border-radius: 4px;
-  padding: 8px 12px;
-  background: var(--md-surface);
-  color: #1d1b20;
-}
-
-input:focus,
-textarea:focus,
-select:focus {
-  border-color: var(--md-primary);
-  box-shadow: 0 0 0 3px rgba(0, 106, 106, 0.14);
-  outline: none;
-}
-
-textarea {
-  resize: vertical;
-  line-height: 1.45;
-}
-
-label {
-  display: grid;
-  gap: 6px;
-  color: #49454f;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.hint {
-  color: #7b8794;
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.45;
-}
-
-h1,
-h2,
-p {
-  margin: 0;
-}
-
-h1 {
-  font-size: 28px;
-  letter-spacing: 0;
-}
-
-h2 {
-  font-size: 16px;
-  letter-spacing: 0;
 }
 
 .shell {
@@ -121,15 +21,16 @@ h2 {
 .menuBar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
 }
 
-.menuBar input {
+.menuBar .MuiTextField-root:first-child {
   width: 190px;
 }
 
-.menuBar select {
+.menuBar .MuiTextField-root:nth-child(3) {
   width: 230px;
 }
 
@@ -160,22 +61,7 @@ h2 {
   gap: 8px;
 }
 
-.checkboxLabel {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.checkboxLabel input {
-  width: auto;
-  min-height: auto;
-}
-
 .notice {
-  padding: 12px 16px;
-  border: 1px solid var(--md-outline-variant);
-  background: var(--md-primary-container);
-  border-radius: 12px;
   margin-bottom: 16px;
 }
 
@@ -204,10 +90,6 @@ h2 {
   display: grid;
   align-self: start;
   gap: 14px;
-  background: var(--md-surface);
-  border: 1px solid var(--md-outline-variant);
-  border-radius: 8px;
-  box-shadow: var(--md-shadow);
   padding: 18px;
   min-width: 0;
 }
@@ -231,10 +113,9 @@ h2 {
   gap: 10px;
 }
 
-.inline input,
-.split label,
-.languageRow input,
-.languageRow select {
+.inline .MuiTextField-root,
+.split .MuiTextField-root,
+.languageRow .MuiTextField-root {
   flex: 1;
   min-width: 0;
 }
@@ -242,7 +123,8 @@ h2 {
 .languageRows {
   display: grid;
   align-content: start;
-  gap: 10px;
+  gap: 20px;
+  padding: 10px 0;
   max-height: 238px;
   overflow: auto;
   padding-right: 2px;
@@ -258,23 +140,23 @@ h2 {
   font-size: 12px;
 }
 
-.languageRow button {
+.languageRow .MuiButton-root {
   flex: 0 0 auto;
 }
 
 .tableWrap {
   overflow: auto;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid #d0d5dd;
   border-radius: 8px;
   max-height: 360px;
-  background: var(--md-surface);
+  background: #ffffff;
 }
 
 .meta {
   gap: 16px;
   padding: 10px;
   color: #66788a;
-  border-bottom: 1px solid var(--md-outline-variant);
+  border-bottom: 1px solid #d0d5dd;
   white-space: nowrap;
 }
 
@@ -297,7 +179,7 @@ td {
 }
 
 th {
-  background: var(--md-surface-container);
+  background: #f2f4f7;
   color: #49454f;
   position: sticky;
   top: 0;
@@ -308,7 +190,12 @@ th {
 }
 
 .previewPanel {
+  align-content: start;
   min-height: 520px;
+}
+
+.previewEmpty {
+  align-self: start;
 }
 
 .planList {
@@ -335,7 +222,7 @@ th {
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 4px 10px;
   align-items: start;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid #d0d5dd;
   border-left: 3px solid transparent;
   border-radius: 8px;
   padding: 10px;
@@ -356,9 +243,9 @@ th {
 }
 
 .selectedPlan {
-  border-color: var(--md-primary);
-  border-left-color: var(--md-primary);
-  background: var(--md-primary-container);
+  border-color: #006a6a;
+  border-left-color: #006a6a;
+  background: #e0f7f6;
 }
 
 .diffPanel {
@@ -439,7 +326,7 @@ code {
 }
 
 .danger {
-  color: var(--md-error);
+  color: #b3261e;
 }
 
 .statusBar {
@@ -459,48 +346,9 @@ code {
   box-shadow: 0 -8px 22px rgba(15, 23, 42, 0.16);
 }
 
-.modalScrim {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  padding: 20px;
-  background: rgba(29, 27, 32, 0.38);
-}
-
-.materialDialog {
-  width: min(560px, 100%);
-  border-radius: 8px;
-  background: var(--md-surface);
-  color: #1d1b20;
-  box-shadow: 0 16px 38px rgba(29, 27, 32, 0.24), 0 4px 12px rgba(29, 27, 32, 0.18);
-  padding: 24px;
-}
-
 .compactDialog {
   display: flex;
   align-items: center;
-  gap: 18px;
-}
-
-.materialDialog p {
-  margin-top: 8px;
-  color: #625b71;
-}
-
-.progressRing {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  border: 4px solid var(--md-primary-container);
-  border-top-color: var(--md-primary);
-  border-radius: 50%;
-  animation: spin 0.9s linear infinite;
-}
-
-.summaryDialog {
-  display: grid;
   gap: 18px;
 }
 
@@ -517,24 +365,13 @@ code {
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid #d0d5dd;
   border-radius: 8px;
-  background: var(--md-surface-container);
+  background: #f2f4f7;
 }
 
 .summaryRow span {
   white-space: nowrap;
-}
-
-.dialogActions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 @media (max-width: 1100px) {
@@ -568,8 +405,7 @@ code {
     display: flex;
   }
 
-  .menuBar select,
-  .menuBar input {
+  .menuBar .MuiTextField-root {
     width: 100%;
   }
 
