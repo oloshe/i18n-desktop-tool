@@ -1,7 +1,7 @@
 {
   "name": "i18n-desktop-tool",
   "private": true,
-  "version": "0.3.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,12 @@
     "tauri:dev": "tauri dev",
     "build": "tsc && vite build",
     "tauri:build": "tauri build",
-    "tauri:portable": "tauri build --no-bundle",
+    "tauri:portable": "tauri build --no-bundle && node scripts/name-portable-build.mjs",
+    "portable:name": "node scripts/name-portable-build.mjs",
     "test": "vitest run"
+  },
+  "portable": {
+    "label": "免安装版"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
