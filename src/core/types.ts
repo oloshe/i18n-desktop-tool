@@ -52,12 +52,14 @@ export interface SavedProjectConfig extends ImportSettings {
 
 export interface LocaleFilePlan {
   lang: string;
+  moduleName: string;
   path: string;
   existingKeys: number;
   incomingKeys: number;
   addedKeys: string[];
   overwrittenKeys: string[];
   skippedKeys: string[];
+  deletedKeys: string[];
   mergedLocale: LocaleObject;
   existingContent: string;
   nextContent: string;

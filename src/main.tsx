@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readFile, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import "./styles.css";
 import {
   deleteProjectConfig,
@@ -36,23 +37,15 @@ const DEFAULT_LANGUAGE_COLUMNS: LanguageColumns = {
 
 type StatusKind = "idle" | "reading" | "previewing" | "importing";
 type DiffLine = { kind: "same" | "added" | "removed"; prefix: string; text: string };
-type ExcelWorkerRequest =
-  | { id: number; type: "workbookInfo"; buffer: ArrayBuffer; sheetName?: string }
-  | { id: number; type: "preview"; buffer: ArrayBuffer; options: ExcelReadOptions }
-  | { id: number; type: "rows"; buffer: ArrayBuffer; options: ExcelReadOptions };
-type ExcelWorkerRequestInput =
-  | { type: "workbookInfo"; buffer: ArrayBuffer; sheetName?: string }
-  | { type: "preview"; buffer: ArrayBuffer; options: ExcelReadOptions }
-  | { type: "rows"; buffer: ArrayBuffer; options: ExcelReadOptions };
-type ExcelWorkerResponse =
-  | { id: number; ok: true; payload: unknown }
-  | { id: number; ok: false; error: string };
-
-let excelWorkerRequestId = 0;
+type ExcelSource = { label: string; path?: string; bytes?: number[] };
+interface ImportSummary {
+  changedFiles: number;
+  lines: Array<{ lang: string; moduleName: string; added: number; modified: number; deleted: number }>;
+}
 
 function App() {
   const [excelPath, setExcelPath] = useState("");
-  const [excelData, setExcelData] = useState<ArrayBuffer | null>(null);
+  const [excelSource, setExcelSource] = useState<ExcelSource | null>(null);
   const [preview, setPreview] = useState<ExcelPreview | null>(null);
   const [sheetName, setSheetName] = useState("");
   const [skipRows, setSkipRows] = useState(0);
@@ -81,6 +74,7 @@ function App() {
   const [selectedPlanPath, setSelectedPlanPath] = useState("");
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<StatusKind>("idle");
+  const [summary, setSummary] = useState<ImportSummary | null>(null);
   const previewRequestRef = useRef(0);
   const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const splitByModule = moduleSplitMode === "keyPrefix";
@@ -98,22 +92,24 @@ function App() {
     window.addEventListener("drop", preventBrowserDrop);
 
     let unlisten: (() => void) | undefined;
-    getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type !== "drop") return;
-        const path = event.payload.paths.find((item) => /\.(xlsx|xls)$/i.test(item));
-        if (!path) {
-          setMessage("请拖入 .xlsx 或 .xls 文件。");
-          return;
-        }
-        void loadExcelFilePath(path, "拖拽读取 Excel 失败");
-      })
-      .then((handler) => {
-        unlisten = handler;
-      })
-      .catch((error) => {
-        showError("注册窗口拖拽失败", error);
-      });
+    if (isTauriRuntime()) {
+      getCurrentWebview()
+        .onDragDropEvent((event) => {
+          if (event.payload.type !== "drop") return;
+          const path = event.payload.paths.find((item) => /\.(xlsx|xls)$/i.test(item));
+          if (!path) {
+            setMessage("请拖入 .xlsx 或 .xls 文件。");
+            return;
+          }
+          void loadExcelFilePath(path, "拖拽读取 Excel 失败");
+        })
+        .then((handler) => {
+          unlisten = handler;
+        })
+        .catch((error) => {
+          showError("注册窗口拖拽失败", error);
+        });
+    }
 
     return () => {
       window.removeEventListener("dragover", preventBrowserDrop);
@@ -123,7 +119,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!excelData) return;
+    if (!excelSource) return;
 
     const requestId = previewRequestRef.current + 1;
     previewRequestRef.current = requestId;
@@ -132,11 +128,7 @@ function App() {
       setStatus("reading");
       await yieldToUi();
       try {
-        const nextPreview = await runExcelWorker<ExcelPreview>({
-          type: "preview",
-          buffer: excelData.slice(0),
-          options: { sheetName, skipRows, headerRow }
-        });
+        const nextPreview = await readExcelPreview(excelSource, { sheetName, skipRows, headerRow });
         if (previewRequestRef.current !== requestId) return;
         setPreview(nextPreview);
         setSheetName(nextPreview.activeSheetName);
@@ -148,7 +140,7 @@ function App() {
         if (previewRequestRef.current === requestId) setStatus("idle");
       }
     })();
-  }, [excelData, sheetName, skipRows, headerRow]);
+  }, [excelSource, sheetName, skipRows, headerRow]);
 
   const settings: ImportSettings = useMemo(
     () => ({
@@ -225,20 +217,18 @@ function App() {
     setStatus("reading");
     await yieldToUi();
     try {
-      const bytes = await readFile(path);
-      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      await loadExcelBuffer(buffer, path);
+      await loadExcelSource({ label: path, path });
     } catch (error) {
       showError(errorPrefix, error);
       setStatus("idle");
     }
   }
 
-  async function loadExcelBuffer(buffer: ArrayBuffer, label: string) {
+  async function loadExcelSource(source: ExcelSource) {
     await yieldToUi();
-    const info = await runExcelWorker<ExcelWorkbookInfo>({ type: "workbookInfo", buffer: buffer.slice(0), sheetName });
-    setExcelPath(label);
-    setExcelData(buffer);
+    const info = await readExcelWorkbookInfo(source, sheetName);
+    setExcelPath(source.label);
+    setExcelSource(source);
     setPreview({
       sheetNames: info.sheetNames,
       activeSheetName: info.activeSheetName,
@@ -268,7 +258,12 @@ function App() {
     setStatus("reading");
     await yieldToUi();
     try {
-      await loadExcelBuffer(await file.arrayBuffer(), (file as File & { path?: string }).path ?? file.name);
+      const path = (file as File & { path?: string }).path;
+      if (path) {
+        await loadExcelSource({ label: path, path });
+      } else {
+        await loadExcelSource({ label: file.name, bytes: arrayBufferToBytes(await file.arrayBuffer()) });
+      }
     } catch (error) {
       showError("拖拽读取 Excel 失败", error);
       setStatus("idle");
@@ -407,7 +402,7 @@ function App() {
   }
 
   async function buildPreviewPlans() {
-    if (!excelData) {
+    if (!excelSource) {
       setMessage("请先选择或拖入 Excel 文件。");
       return;
     }
@@ -419,11 +414,7 @@ function App() {
     setStatus("previewing");
     setMessage("");
     try {
-      const rows = await runExcelWorker<Array<Record<string, string>>>({
-        type: "rows",
-        buffer: excelData.slice(0),
-        options: { sheetName, skipRows, headerRow }
-      });
+      const rows = await readExcelRows(excelSource, { sheetName, skipRows, headerRow });
       const locales = generateLocales(rows, keyColumn, languageColumns, {
         splitByModule,
         moduleSplitMode,
@@ -434,7 +425,7 @@ function App() {
         moduleNameReplacements: parseModuleNameReplacements(moduleNameReplacements),
         spaceWrappedLanguages: parseModuleFilter(spaceWrappedLanguages)
       });
-      const writes = new Map<string, { lang: string; path: string; locale: LocaleObject }>();
+      const writes = new Map<string, { lang: string; path: string; locale: LocaleObject; modules: Set<string> }>();
       const nextPlans: LocaleFilePlan[] = [];
       const templateSplitsFiles = outputPathTemplate.includes("{module}");
 
@@ -449,16 +440,18 @@ function App() {
           writes.set(path, {
             lang,
             path,
-            locale: existing ? combineIncomingLocale(existing.locale, localeForPath) : localeForPath
+            locale: existing ? combineIncomingLocale(existing.locale, localeForPath) : localeForPath,
+            modules: new Set([...(existing?.modules ?? []), moduleName || "root"])
           });
         }
       }
 
-      for (const { lang, path, locale } of writes.values()) {
+      for (const { lang, path, locale, modules } of writes.values()) {
         await yieldToUi();
         try {
           const snapshot = await readLocaleFileSnapshot(path, outputFormat);
           const merged = mergeLocaleObjects(snapshot.locale, locale, mergeStrategy, missingKeyStrategy);
+          const deletedKeys = missingKeyStrategy === "remove" ? getDeletedLocaleKeys(snapshot.locale, merged.mergedLocale) : [];
           const nextContent = await formatLocaleForSnapshot(merged.mergedLocale, outputFormat, snapshot, {
             eol: snapshot.eol,
             quoteObjectProperties,
@@ -466,23 +459,27 @@ function App() {
           });
           nextPlans.push({
             lang,
+            moduleName: Array.from(modules).join(", "),
             path,
             existingKeys: countLocaleKeys(snapshot.locale),
             incomingKeys: countLocaleKeys(locale),
             existingContent: snapshot.content,
             nextContent,
             eol: snapshot.eol,
+            deletedKeys,
             ...merged
           });
         } catch (error) {
           nextPlans.push({
             lang,
+            moduleName: Array.from(modules).join(", "),
             path,
             existingKeys: 0,
             incomingKeys: countLocaleKeys(locale),
             addedKeys: [],
             overwrittenKeys: [],
             skippedKeys: [],
+            deletedKeys: [],
             mergedLocale: {},
             existingContent: "",
             nextContent: "",
@@ -492,9 +489,10 @@ function App() {
         }
       }
 
-      setPlans(nextPlans);
-      setSelectedPlanPath(nextPlans[0]?.path ?? "");
-      setMessage("写入预览已生成。");
+      const changedPlans = nextPlans.filter((plan) => plan.error || plan.existingContent !== plan.nextContent);
+      setPlans(changedPlans);
+      setSelectedPlanPath(changedPlans[0]?.path ?? "");
+      setMessage(changedPlans.length > 0 ? "写入预览已生成。" : "写入预览已生成：没有文件变化。");
     } catch (error) {
       showError("生成预览失败", error);
     } finally {
@@ -516,6 +514,16 @@ function App() {
     setStatus("importing");
     try {
       await Promise.all(plans.map((plan) => writeLocaleContent(plan.path, plan.nextContent)));
+      setSummary({
+        changedFiles: plans.length,
+        lines: plans.map((plan) => ({
+          lang: plan.lang,
+          moduleName: plan.moduleName,
+          added: plan.addedKeys.length,
+          modified: plan.overwrittenKeys.length,
+          deleted: plan.deletedKeys.length
+        }))
+      });
       setMessage("导入完成。");
     } catch (error) {
       showError("写入失败", error);
@@ -532,6 +540,10 @@ function App() {
     setSelectedPlanPath(path);
     const target = diffScrollerRef.current?.querySelector(`[data-plan-path="${cssEscape(path)}"]`);
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function closeSummary() {
+    setSummary(null);
   }
 
   function handleDiffScroll() {
@@ -807,7 +819,7 @@ function App() {
                       <span className="danger">{plan.error}</span>
                     ) : (
                       <span className="planStats">
-                        新增 {plan.addedKeys.length} · 覆盖 {plan.overwrittenKeys.length} · 跳过 {plan.skippedKeys.length} · {plan.eol.toUpperCase()}
+                        新增 {plan.addedKeys.length} · 修改 {plan.overwrittenKeys.length} · 删除 {plan.deletedKeys.length} · 跳过 {plan.skippedKeys.length} · {plan.eol.toUpperCase()}
                       </span>
                     )}
                   </button>
@@ -818,7 +830,10 @@ function App() {
                   <section className="diffFile" data-plan-path={plan.path} key={`${plan.lang}-${plan.path}`}>
                     <div className="diffFileHead">
                       <strong>{getFileName(plan.path)}</strong>
-                      <span>add: {plan.addedKeys.length}, modify: {plan.overwrittenKeys.length}, skip: {plan.skippedKeys.length}</span>
+                      <span>
+                        add: {plan.addedKeys.length}, modify: {plan.overwrittenKeys.length}, delete: {plan.deletedKeys.length}, skip:{" "}
+                        {plan.skippedKeys.length}
+                      </span>
                     </div>
                     <div className="diffPath">{plan.path}</div>
                     {plan.error ? (
@@ -846,6 +861,8 @@ function App() {
       </section>
 
       <StatusBar status={status} plans={plans.length} previewRows={preview?.rows.length ?? 0} />
+      <OperationDialog status={status} />
+      {summary && <ImportSummaryDialog summary={summary} onClose={closeSummary} />}
     </main>
   );
 }
@@ -866,6 +883,53 @@ function StatusBar({ status, plans, previewRows }: { status: StatusKind; plans: 
       <span>预览行：{previewRows}</span>
       <span>待写入文件：{plans}</span>
     </footer>
+  );
+}
+
+function OperationDialog({ status }: { status: StatusKind }) {
+  if (status === "idle") return null;
+
+  const title =
+    status === "reading" ? "导入 Excel" : status === "previewing" ? "生成写入预览" : "写入文件";
+  const detail =
+    status === "reading"
+      ? "正在读取工作簿并解析表头。"
+      : status === "previewing"
+        ? "正在比较 Excel 内容和现有 locale 文件。"
+        : "正在把预览中的变更写入项目。";
+
+  return (
+    <div className="modalScrim" role="status" aria-live="polite">
+      <div className="materialDialog compactDialog">
+        <div className="progressRing" />
+        <div>
+          <h2>{title}</h2>
+          <p>{detail}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportSummaryDialog({ summary, onClose }: { summary: ImportSummary; onClose: () => void }) {
+  return (
+    <div className="modalScrim">
+      <div className="materialDialog summaryDialog" role="dialog" aria-modal="true" aria-labelledby="import-summary-title">
+        <h2 id="import-summary-title">导入成功，修改了 {summary.changedFiles} 个文件</h2>
+        <div className="summaryList">
+          {summary.lines.map((line, index) => (
+            <div className="summaryRow" key={`${line.lang}-${line.moduleName}-${index}`}>
+              <strong>{line.lang}</strong>
+              <code>{line.moduleName}</code>
+              <span>新增、修改、删除：{line.added} / {line.modified} / {line.deleted}</span>
+            </div>
+          ))}
+        </div>
+        <div className="dialogActions">
+          <button className="primary" onClick={onClose}>完成</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -896,6 +960,18 @@ function countLocaleKeys(locale: LocaleObject): number {
     if (value && typeof value === "object") return count + countLocaleKeys(value);
     return count + 1;
   }, 0);
+}
+
+function getDeletedLocaleKeys(before: LocaleObject, after: LocaleObject): string[] {
+  const afterKeys = new Set(flattenLocaleKeys(after));
+  return flattenLocaleKeys(before).filter((key) => !afterKeys.has(key));
+}
+
+function flattenLocaleKeys(locale: LocaleObject, prefix = ""): string[] {
+  return Object.entries(locale).flatMap(([key, value]) => {
+    const nextKey = prefix ? `${prefix}.${key}` : key;
+    return isLocaleObject(value) ? flattenLocaleKeys(value, nextKey) : [nextKey];
+  });
 }
 
 function combineIncomingLocale(target: LocaleObject, incoming: LocaleObject): LocaleObject {
@@ -946,31 +1022,31 @@ function cssEscape(value: string): string {
   return globalThis.CSS?.escape(value) ?? value.replace(/["\\]/g, "\\$&");
 }
 
+function isTauriRuntime(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
+
 function yieldToUi(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-function runExcelWorker<T>(request: ExcelWorkerRequestInput): Promise<T> {
-  const worker = new Worker(new URL("./workers/excelWorker.ts", import.meta.url), { type: "module" });
-  const id = (excelWorkerRequestId += 1);
-  const message = { ...request, id } as ExcelWorkerRequest;
+function arrayBufferToBytes(buffer: ArrayBuffer): number[] {
+  return Array.from(new Uint8Array(buffer));
+}
 
-  return new Promise<T>((resolve, reject) => {
-    worker.onmessage = (event: MessageEvent<ExcelWorkerResponse>) => {
-      if (event.data.id !== id) return;
-      worker.terminate();
-      if (event.data.ok) {
-        resolve(event.data.payload as T);
-      } else {
-        reject(new Error(event.data.error));
-      }
-    };
-    worker.onerror = (event) => {
-      worker.terminate();
-      reject(new Error(event.message));
-    };
-    worker.postMessage(message, [message.buffer]);
-  });
+function readExcelWorkbookInfo(source: ExcelSource, sheetName?: string): Promise<ExcelWorkbookInfo> {
+  if (source.path) return invoke("read_excel_workbook_info", { path: source.path, sheetName });
+  return invoke("read_excel_workbook_info_bytes", { bytes: source.bytes ?? [], sheetName });
+}
+
+function readExcelPreview(source: ExcelSource, options: ExcelReadOptions): Promise<ExcelPreview> {
+  if (source.path) return invoke("preview_excel", { path: source.path, options });
+  return invoke("preview_excel_bytes", { bytes: source.bytes ?? [], options });
+}
+
+function readExcelRows(source: ExcelSource, options: ExcelReadOptions): Promise<Array<Record<string, string>>> {
+  if (source.path) return invoke("rows_from_excel", { path: source.path, options });
+  return invoke("rows_from_excel_bytes", { bytes: source.bytes ?? [], options });
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
