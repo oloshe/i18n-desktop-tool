@@ -27,7 +27,7 @@ export async function readExistingLocale(path: string, format: OutputFormat): Pr
 
 export async function readLocaleFileSnapshot(path: string, format: OutputFormat): Promise<LocaleFileSnapshot> {
   try {
-    if (!(await exists(path))) {
+    if (!(await fileExists(path))) {
       return { exists: false, content: "", locale: {}, eol: "lf" };
     }
     const content = await readTextFile(path);
@@ -40,9 +40,26 @@ export async function readLocaleFileSnapshot(path: string, format: OutputFormat)
       objectRange
     };
   } catch (error) {
+    if (isMissingFileError(error)) {
+      return { exists: false, content: "", locale: {}, eol: "lf" };
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`读取 locale 文件失败：${message}`);
   }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    return await exists(path);
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not found|not exist|no such file|cannot find|找不到|不存在|os error 2/i.test(message);
 }
 
 export async function writeLocaleContent(path: string, content: string): Promise<void> {

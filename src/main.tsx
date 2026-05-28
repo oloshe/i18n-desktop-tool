@@ -493,6 +493,7 @@ function App() {
             lang,
             moduleName: Array.from(modules).join(", "),
             path,
+            fileAction: snapshot.exists ? "update" : "create",
             existingKeys: countLocaleKeys(snapshot.locale),
             incomingKeys: countLocaleKeys(locale),
             existingContent: snapshot.content,
@@ -506,6 +507,7 @@ function App() {
             lang,
             moduleName: Array.from(modules).join(", "),
             path,
+            fileAction: "update",
             existingKeys: 0,
             incomingKeys: countLocaleKeys(locale),
             addedKeys: [],
@@ -860,13 +862,17 @@ function App() {
                     key={`${plan.lang}-${plan.path}`}
                     onClick={() => scrollToPlan(plan.path)}
                   >
-                    <strong>{plan.lang}</strong>
-                    <code title={plan.path}>{plan.path}</code>
+                    <span className="planMain">
+                      <strong>{plan.lang}</strong>
+                      <code title={plan.path}>{plan.path}</code>
+                    </span>
                     {plan.error ? (
                       <span className="danger">{plan.error}</span>
                     ) : (
                       <span className="planStats">
-                        新增 {plan.addedKeys.length} · 修改 {plan.overwrittenKeys.length} · 删除 {plan.deletedKeys.length} · 跳过 {plan.skippedKeys.length} · {plan.eol.toUpperCase()}
+                        {plan.fileAction === "create" ? "新增文件" : "编辑文件"} · 新增 {plan.addedKeys.length} · 修改{" "}
+                        {plan.overwrittenKeys.length} · 删除 {plan.deletedKeys.length} · 跳过 {plan.skippedKeys.length} ·{" "}
+                        {plan.eol.toUpperCase()}
                       </span>
                     )}
                   </ButtonBase>
@@ -877,6 +883,7 @@ function App() {
                   <section className="diffFile" data-plan-path={plan.path} key={`${plan.lang}-${plan.path}`}>
                     <div className="diffFileHead">
                       <strong>{getFileName(plan.path)}</strong>
+                      <span>{plan.fileAction === "create" ? "新增文件" : "编辑文件"}</span>
                       <span>
                         add: {plan.addedKeys.length}, modify: {plan.overwrittenKeys.length}, delete: {plan.deletedKeys.length}, skip:{" "}
                         {plan.skippedKeys.length}

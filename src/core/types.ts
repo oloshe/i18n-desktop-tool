@@ -54,6 +54,7 @@ export interface LocaleFilePlan {
   lang: string;
   moduleName: string;
   path: string;
+  fileAction: "create" | "update";
   existingKeys: number;
   incomingKeys: number;
   addedKeys: string[];

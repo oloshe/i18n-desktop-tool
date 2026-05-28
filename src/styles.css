@@ -218,25 +218,43 @@ th {
 }
 
 .plan {
-  display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
-  gap: 4px 10px;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
   border: 1px solid #d0d5dd;
   border-left: 3px solid transparent;
   border-radius: 8px;
-  padding: 10px;
+  padding: 12px 14px;
   width: 100%;
   text-align: left;
 }
 
-.plan code {
+.planMain {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
+  width: 100%;
+  padding: 8px;
+  font-family: ui-monospace;
+}
+
+.planMain strong {
+  flex: 0 0 78px;
+}
+
+.plan code {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-style: italic;
+  text-decoration: underline;
+  font-family: auto;
 }
 
 .planStats,
 .plan .danger {
-  grid-column: 2;
   color: #64748b;
   font-size: 12px;
   line-height: 1.35;
