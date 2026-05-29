@@ -1,4 +1,5 @@
 import type { LocaleObject, OutputFormat } from "./types";
+import { parseXcstringsContent } from "./xcstrings";
 
 export interface LocaleObjectRange {
   start: number;
@@ -13,6 +14,9 @@ export function parseLocaleContent(content: string, format: OutputFormat): Local
 
   if (format === "json") {
     return normalizeLocaleObject(JSON.parse(trimmed));
+  }
+  if (format === "xcstrings") {
+    return parseXcstringsContent(content);
   }
 
   const objectRange = findLocaleObjectRange(content);

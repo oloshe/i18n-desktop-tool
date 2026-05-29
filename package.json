@@ -10,6 +10,8 @@
     "build": "tsc && vite build",
     "tauri:build": "tauri build",
     "tauri:portable": "tauri build --no-bundle && node scripts/name-portable-build.mjs",
+    "tauri:mac:portable": "node scripts/build-mac-portable.mjs",
+    "tauri:mac:bundle": "npm run tauri:mac:portable",
     "portable:name": "node scripts/name-portable-build.mjs",
     "test": "vitest run"
   },

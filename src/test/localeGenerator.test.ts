@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { generateLocales, mergeLocaleObjects, resolveLocalePath } from "../core/localeGenerator";
+import { generateXcstringsLocale } from "../core/xcstrings";
 
 describe("localeGenerator", () => {
   it("resolves locale paths from lang and module templates", () => {
@@ -49,6 +50,19 @@ describe("localeGenerator", () => {
           "follow-anchors": "Follow anchors"
         }
       }
+    });
+  });
+
+  it("generates xcstrings locale data and skips empty keys", () => {
+    const rows = [
+      { key: "hello", cn: "你好", en: "Hello" },
+      { key: "", cn: "忽略", en: "Ignored" },
+      { key: "bye", cn: "", en: "Bye" }
+    ];
+
+    expect(generateXcstringsLocale(rows, "key", { "zh-CN": "cn", "en-US": "en" })).toEqual({
+      hello: { "zh-CN": "你好", "en-US": "Hello" },
+      bye: { "en-US": "Bye" }
     });
   });
 

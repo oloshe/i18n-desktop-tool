@@ -35,6 +35,7 @@ import {
 } from "./core/configStore";
 import { generateLocales, mergeLocaleObjects, resolveLocalePath } from "./core/localeGenerator";
 import { formatLocaleForSnapshot, readLocaleFileSnapshot, resolveProjectFile, writeLocaleContent } from "./core/localeFileWriter";
+import { generateXcstringsLocale } from "./core/xcstrings";
 import type {
   ExcelPreview,
   ImportSettings,
@@ -80,6 +81,7 @@ function App() {
   const [excelSource, setExcelSource] = useState<ExcelSource | null>(null);
   const [preview, setPreview] = useState<ExcelPreview | null>(null);
   const [sheetName, setSheetName] = useState("");
+  const [selectedSheetNames, setSelectedSheetNames] = useState<string[]>([]);
   const [skipRows, setSkipRows] = useState(0);
   const [headerRow, setHeaderRow] = useState(1);
   const [projectName, setProjectName] = useState("默认项目");
@@ -110,6 +112,7 @@ function App() {
   const previewRequestRef = useRef(0);
   const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const splitByModule = moduleSplitMode === "keyPrefix";
+  const isXcstringsOutput = outputFormat === "xcstrings";
 
   useEffect(() => {
     setConfigs(loadProjectConfigs());
@@ -164,6 +167,10 @@ function App() {
         if (previewRequestRef.current !== requestId) return;
         setPreview(nextPreview);
         setSheetName(nextPreview.activeSheetName);
+        setSelectedSheetNames((current) => {
+          const kept = current.filter((name) => nextPreview.sheetNames.includes(name));
+          return kept.length > 0 ? kept : [nextPreview.activeSheetName];
+        });
         if (nextPreview.headers.includes("key")) setKeyColumn("key");
         setPlans([]);
       } catch (error) {
@@ -184,6 +191,7 @@ function App() {
       mergeStrategy,
       missingKeyStrategy,
       sheetName,
+      sheetNames: selectedSheetNames,
       skipRows,
       headerRow,
       moduleSplitMode,
@@ -207,6 +215,7 @@ function App() {
       mergeStrategy,
       missingKeyStrategy,
       sheetName,
+      selectedSheetNames,
       skipRows,
       headerRow,
       moduleSplitMode,
@@ -270,6 +279,7 @@ function App() {
       rows: []
     });
     setSheetName(info.activeSheetName);
+    setSelectedSheetNames([info.activeSheetName]);
     setMessage("Excel 已读取。");
   }
 
@@ -333,6 +343,7 @@ function App() {
     setMergeStrategy(config.mergeStrategy);
     setMissingKeyStrategy(config.missingKeyStrategy ?? "keep");
     setSheetName(config.sheetName ?? "");
+    setSelectedSheetNames(config.sheetNames?.length ? config.sheetNames : config.sheetName ? [config.sheetName] : []);
     setSkipRows(config.skipRows ?? 0);
     setHeaderRow(config.headerRow ?? 1);
     const legacyBigEaterConfig = !config.moduleSplitMode && (config.moduleFilter ?? "").trim() === "大胃王";
@@ -349,6 +360,13 @@ function App() {
     setEnsureTrailingNewline(config.ensureTrailingNewline ?? true);
     setPlans([]);
     setSelectedPlanPath("");
+  }
+
+  function handleOutputFormatChange(format: OutputFormat) {
+    setOutputFormat(format);
+    if (format === "xcstrings" && !/\.xcstrings$/i.test(outputPathTemplate.trim())) {
+      setOutputPathTemplate("Localizable.xcstrings");
+    }
   }
 
   function loadConfig(id: string) {
@@ -446,7 +464,40 @@ function App() {
     setStatus("previewing");
     setMessage("");
     try {
-      const rows = await readExcelRows(excelSource, { sheetName, skipRows, headerRow });
+      const rows = await readExcelRows(excelSource, { sheetName, sheetNames: selectedSheetNames, skipRows, headerRow });
+      if (isXcstringsOutput) {
+        const sourceLanguage = getSourceLanguage(languageColumns);
+        const locale = generateXcstringsLocale(rows, keyColumn, languageColumns);
+        const path = await resolveProjectFile(projectRoot, getXcstringsOutputPath(outputPathTemplate));
+        const snapshot = await readLocaleFileSnapshot(path, outputFormat);
+        const merged = mergeLocaleObjects(snapshot.locale, locale, mergeStrategy, missingKeyStrategy);
+        const deletedKeys = missingKeyStrategy === "remove" ? getDeletedLocaleKeys(snapshot.locale, merged.mergedLocale) : [];
+        const nextContent = await formatLocaleForSnapshot(merged.mergedLocale, outputFormat, snapshot, {
+          eol: snapshot.eol,
+          ensureTrailingNewline,
+          sourceLanguage
+        });
+        const nextPlans: LocaleFilePlan[] = [
+          {
+            lang: sourceLanguage,
+            moduleName: "xcstrings",
+            path,
+            fileAction: snapshot.exists ? "update" : "create",
+            existingKeys: countLocaleKeys(snapshot.locale),
+            incomingKeys: countLocaleKeys(locale),
+            existingContent: snapshot.content,
+            nextContent,
+            eol: snapshot.eol,
+            deletedKeys,
+            ...merged
+          }
+        ];
+        const changedPlans = nextPlans.filter((plan) => plan.error || plan.existingContent !== plan.nextContent);
+        setPlans(changedPlans);
+        setSelectedPlanPath(changedPlans[0]?.path ?? "");
+        setMessage(changedPlans.length > 0 ? "写入预览已生成。" : "写入预览已生成：没有文件变化。");
+        return;
+      }
       const locales = generateLocales(rows, keyColumn, languageColumns, {
         splitByModule,
         moduleSplitMode,
@@ -664,13 +715,20 @@ function App() {
               <Typography component="h2" variant="h6">Excel 设置</Typography>
               <TextField
                 label="Sheet"
-                value={sheetName}
-                onChange={(event) => setSheetName(event.target.value)}
+                value={selectedSheetNames}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  const next = typeof value === "string" ? value.split(",") : value;
+                  setSelectedSheetNames(next);
+                  setSheetName(next[0] ?? "");
+                }}
                 disabled={!preview}
                 select
+                slotProps={{ select: { multiple: true } }}
                 size="small"
                 fullWidth
               >
+                {!preview && <MenuItem value="">Sheet</MenuItem>}
                 {preview?.sheetNames.map((name) => (
                   <MenuItem key={name} value={name}>{name}</MenuItem>
                 ))}
@@ -750,10 +808,11 @@ function App() {
                 size="small"
               />
               <Stack className="split" direction="row" spacing={1}>
-                <TextField label="输出格式" value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as OutputFormat)} select size="small" fullWidth>
+                <TextField label="输出格式" value={outputFormat} onChange={(event) => handleOutputFormatChange(event.target.value as OutputFormat)} select size="small" fullWidth>
                   <MenuItem value="json">json</MenuItem>
                   <MenuItem value="js">js</MenuItem>
                   <MenuItem value="ts">ts</MenuItem>
+                  <MenuItem value="xcstrings">xcstrings</MenuItem>
                 </TextField>
                 <TextField label="合并策略" value={mergeStrategy} onChange={(event) => setMergeStrategy(event.target.value as MergeStrategy)} select size="small" fullWidth>
                   <MenuItem value="overwrite">覆盖已有 key</MenuItem>
@@ -764,54 +823,58 @@ function App() {
                   <MenuItem value="remove">删除</MenuItem>
                 </TextField>
               </Stack>
-              <Stack className="split" direction="row" spacing={1}>
-                <TextField label="key 风格" value={keyStyle} onChange={(event) => setKeyStyle(event.target.value as KeyStyle)} select size="small" fullWidth>
-                  <MenuItem value="nested">nested key</MenuItem>
-                  <MenuItem value="flat">平铺 key</MenuItem>
-                </TextField>
-                <TextField label="模块划分" value={moduleSplitMode} onChange={(event) => setModuleSplitMode(event.target.value as ModuleSplitMode)} select size="small" fullWidth>
-                  <MenuItem value="none">不划分</MenuItem>
-                  <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
-                  <MenuItem value="sectionRow">无前缀模块行</MenuItem>
-                </TextField>
-                <TextField label="模块名来源" value={moduleNameSource} onChange={(event) => setModuleNameSource(event.target.value as ModuleNameSource)} select size="small" fullWidth>
-                  <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
-                  <MenuItem value="sectionRow">按模块行</MenuItem>
-                </TextField>
-              </Stack>
-              <TextField label="只导入模块" value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value)} placeholder="例如：base, agency；留空则全部导入" size="small" />
-              <TextField label="忽略模块" value={ignoredModuleFilter} onChange={(event) => setIgnoredModuleFilter(event.target.value)} placeholder="例如：debug, deprecated" size="small" />
-              <TextField
-                label="模块名替换"
-                value={moduleNameReplacements}
-                onChange={(event) => setModuleNameReplacements(event.target.value)}
-                placeholder="例如：大胃王=gachaguess，每行一个"
-                multiline
-                minRows={3}
-                size="small"
-              />
-              <FormControlLabel
-                control={<Checkbox checked={removeModulePrefix} onChange={(event) => setRemoveModulePrefix(event.target.checked)} />}
-                label="移除模块前缀"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={quoteObjectProperties}
-                    onChange={(event) => setQuoteObjectProperties(event.target.checked)}
-                    disabled={outputFormat === "json"}
+              {!isXcstringsOutput && (
+                <>
+                  <Stack className="split" direction="row" spacing={1}>
+                    <TextField label="key 风格" value={keyStyle} onChange={(event) => setKeyStyle(event.target.value as KeyStyle)} select size="small" fullWidth>
+                      <MenuItem value="nested">nested key</MenuItem>
+                      <MenuItem value="flat">平铺 key</MenuItem>
+                    </TextField>
+                    <TextField label="模块划分" value={moduleSplitMode} onChange={(event) => setModuleSplitMode(event.target.value as ModuleSplitMode)} select size="small" fullWidth>
+                      <MenuItem value="none">不划分</MenuItem>
+                      <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
+                      <MenuItem value="sectionRow">无前缀模块行</MenuItem>
+                    </TextField>
+                    <TextField label="模块名来源" value={moduleNameSource} onChange={(event) => setModuleNameSource(event.target.value as ModuleNameSource)} select size="small" fullWidth>
+                      <MenuItem value="keyPrefix">按 key 第一段</MenuItem>
+                      <MenuItem value="sectionRow">按模块行</MenuItem>
+                    </TextField>
+                  </Stack>
+                  <TextField label="只导入模块" value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value)} placeholder="例如：base, agency；留空则全部导入" size="small" />
+                  <TextField label="忽略模块" value={ignoredModuleFilter} onChange={(event) => setIgnoredModuleFilter(event.target.value)} placeholder="例如：debug, deprecated" size="small" />
+                  <TextField
+                    label="模块名替换"
+                    value={moduleNameReplacements}
+                    onChange={(event) => setModuleNameReplacements(event.target.value)}
+                    placeholder="例如：大胃王=gachaguess，每行一个"
+                    multiline
+                    minRows={3}
+                    size="small"
                   />
-                }
-                label="JS/TS 属性名使用双引号"
-              />
-              <TextField
-                label="两边加空格语言"
-                value={spaceWrappedLanguages}
-                onChange={(event) => setSpaceWrappedLanguages(event.target.value)}
-                placeholder="例如：ar, ur；留空则不处理"
-                helperText="适用于 Cocos 阿语/乌尔都语等需要文本左右空格的项目。"
-                size="small"
-              />
+                  <FormControlLabel
+                    control={<Checkbox checked={removeModulePrefix} onChange={(event) => setRemoveModulePrefix(event.target.checked)} />}
+                    label="移除模块前缀"
+                  />
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={quoteObjectProperties}
+                        onChange={(event) => setQuoteObjectProperties(event.target.checked)}
+                        disabled={outputFormat === "json"}
+                      />
+                    }
+                    label="JS/TS 属性名使用双引号"
+                  />
+                  <TextField
+                    label="两边加空格语言"
+                    value={spaceWrappedLanguages}
+                    onChange={(event) => setSpaceWrappedLanguages(event.target.value)}
+                    placeholder="例如：ar, ur；留空则不处理"
+                    helperText="适用于 Cocos 阿语/乌尔都语等需要文本左右空格的项目。"
+                    size="small"
+                  />
+                </>
+              )}
               <FormControlLabel
                 control={<Checkbox checked={ensureTrailingNewline} onChange={(event) => setEnsureTrailingNewline(event.target.checked)} />}
                 label="文件末尾保留空行"
@@ -994,6 +1057,16 @@ function parseModuleFilter(value: string): string[] {
     .split(/[,，\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function getSourceLanguage(languageColumns: LanguageColumns): string {
+  return Object.keys(languageColumns).find((lang) => lang.trim())?.trim() ?? "en";
+}
+
+function getXcstringsOutputPath(template: string): string {
+  const outputPath = template.trim();
+  if (!outputPath) throw new Error("输出路径不能为空。");
+  return outputPath.split("\\").join("/");
 }
 
 function parseModuleNameReplacements(value: string): Record<string, string> {

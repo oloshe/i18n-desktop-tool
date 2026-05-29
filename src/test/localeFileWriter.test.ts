@@ -6,6 +6,17 @@ describe("localeFileWriter", () => {
     await expect(formatLocale({ hello: "Hello" }, "json")).resolves.toContain('"hello": "Hello"');
   });
 
+  it("formats xcstrings output", async () => {
+    const output = await formatLocale({ hello: { "en-US": "Hello", "zh-CN": "你好" } }, "xcstrings", {
+      sourceLanguage: "en-US"
+    });
+
+    expect(output).toContain('"sourceLanguage": "en-US"');
+    expect(output).toContain('"hello"');
+    expect(output).toContain('"zh-CN"');
+    expect(output).toContain('"value": "你好"');
+  });
+
   it("formats ts output with const assertion", async () => {
     await expect(formatLocale({ hello: "Hello" }, "ts")).resolves.toContain("as const");
   });

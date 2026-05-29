@@ -1,4 +1,4 @@
-export type OutputFormat = "json" | "js" | "ts";
+export type OutputFormat = "json" | "js" | "ts" | "xcstrings";
 export type MergeStrategy = "overwrite" | "skip";
 export type MissingKeyStrategy = "keep" | "remove";
 export type KeyStyle = "nested" | "flat";
@@ -29,6 +29,7 @@ export interface ImportSettings {
   mergeStrategy: MergeStrategy;
   missingKeyStrategy: MissingKeyStrategy;
   sheetName: string;
+  sheetNames?: string[];
   skipRows: number;
   headerRow: number;
   moduleSplitMode?: ModuleSplitMode;

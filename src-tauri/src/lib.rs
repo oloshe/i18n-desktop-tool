@@ -9,6 +9,7 @@ const PREVIEW_LIMIT: usize = 20;
 #[serde(rename_all = "camelCase")]
 struct ExcelReadOptions {
   sheet_name: Option<String>,
+  sheet_names: Option<Vec<String>>,
   skip_rows: Option<usize>,
   header_row: Option<usize>,
 }
@@ -133,24 +134,27 @@ where
   let skip_rows = options.skip_rows.unwrap_or(0);
   let header_row = options.header_row.unwrap_or(1).max(1);
   let sheet_names = workbook.sheet_names().to_owned();
-  let active_sheet_name = active_sheet_name(&sheet_names, options.sheet_name.as_deref())?;
-  let matrix = sheet_matrix(workbook, &active_sheet_name)?;
-  let headers = get_headers(&matrix, header_row)?;
   let data_start_index = skip_rows.max(header_row);
+  let mut rows = Vec::new();
 
-  Ok(
-    matrix
-      .iter()
-      .skip(data_start_index)
-      .filter(|row| has_filled_cell(row, headers.len()))
-      .map(|row| row_to_record(row, &headers))
-      .collect(),
-  )
+  for sheet_name in active_sheet_names(&sheet_names, options.sheet_name.as_deref(), options.sheet_names.as_deref())? {
+    let matrix = sheet_matrix(workbook, &sheet_name)?;
+    let headers = get_headers(&matrix, header_row)?;
+    rows.extend(
+      matrix
+        .iter()
+        .skip(data_start_index)
+        .filter(|row| has_filled_cell(row, headers.len()))
+        .map(|row| row_to_record(row, &headers)),
+    );
+  }
+
+  Ok(rows)
 }
 
 fn active_sheet_name(sheet_names: &[String], requested: Option<&str>) -> Result<String, String> {
   if sheet_names.is_empty() {
-    return Err("Excel 文件没有可读取的 sheet。".to_string());
+    return Err("Excel file has no readable sheets.".to_string());
   }
 
   Ok(
@@ -159,6 +163,27 @@ fn active_sheet_name(sheet_names: &[String], requested: Option<&str>) -> Result<
       .unwrap_or(&sheet_names[0])
       .to_string(),
   )
+}
+
+fn active_sheet_names(sheet_names: &[String], requested: Option<&str>, requested_names: Option<&[String]>) -> Result<Vec<String>, String> {
+  if sheet_names.is_empty() {
+    return Err("Excel file has no readable sheets.".to_string());
+  }
+
+  let mut selected = Vec::new();
+  if let Some(names) = requested_names {
+    for name in names {
+      if sheet_names.iter().any(|sheet| sheet == name) && !selected.iter().any(|sheet| sheet == name) {
+        selected.push(name.to_string());
+      }
+    }
+  }
+
+  if !selected.is_empty() {
+    return Ok(selected);
+  }
+
+  Ok(vec![active_sheet_name(sheet_names, requested)?])
 }
 
 fn sheet_matrix<RS>(workbook: &mut Sheets<RS>, sheet_name: &str) -> Result<Vec<Vec<String>>, String>
@@ -172,7 +197,7 @@ where
     .collect();
 
   if matrix.is_empty() {
-    return Err(format!("Sheet \"{}\" 是空的。", sheet_name));
+    return Err(format!("Sheet \"{}\" is empty.", sheet_name));
   }
 
   Ok(matrix)
@@ -182,16 +207,16 @@ fn get_headers(matrix: &[Vec<String>], header_row: usize) -> Result<Vec<String>,
   let header_index = header_row - 1;
   let row = matrix
     .get(header_index)
-    .ok_or_else(|| "表头行超出 Excel 内容范围。".to_string())?;
+    .ok_or_else(|| "Header row is outside the Excel content range.".to_string())?;
   let headers: Vec<String> = row.iter().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()).collect();
 
   if headers.is_empty() {
-    return Err("表头行没有有效表头。".to_string());
+    return Err("Header row has no valid headers.".to_string());
   }
 
   for (index, header) in headers.iter().enumerate() {
     if headers.iter().skip(index + 1).any(|other| other == header) {
-      return Err("Excel 表头存在重复列名，请先调整后再导入。".to_string());
+      return Err("Excel headers contain duplicate column names.".to_string());
     }
   }
 

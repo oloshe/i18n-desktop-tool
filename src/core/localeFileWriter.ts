@@ -6,6 +6,7 @@ import estreePlugin from "prettier/plugins/estree";
 import typescriptPlugin from "prettier/plugins/typescript";
 import type { LocaleObject, OutputFormat } from "./types";
 import { findLocaleObjectRange, parseLocaleContent, type LocaleObjectRange } from "./localeFileReader";
+import { formatXcstringsLocale } from "./xcstrings";
 
 export interface LocaleFileSnapshot {
   exists: boolean;
@@ -19,6 +20,7 @@ export interface FormatLocaleOptions {
   eol?: "lf" | "crlf";
   ensureTrailingNewline?: boolean;
   quoteObjectProperties?: boolean;
+  sourceLanguage?: string;
 }
 
 export async function readExistingLocale(path: string, format: OutputFormat): Promise<LocaleObject> {
@@ -31,7 +33,7 @@ export async function readLocaleFileSnapshot(path: string, format: OutputFormat)
       return { exists: false, content: "", locale: {}, eol: "lf" };
     }
     const content = await readTextFile(path);
-    const objectRange = format === "json" || !content.trim() ? undefined : findLocaleObjectRange(content);
+    const objectRange = format === "json" || format === "xcstrings" || !content.trim() ? undefined : findLocaleObjectRange(content);
     return {
       exists: true,
       content,
@@ -91,6 +93,9 @@ export async function formatLocale(
   const eol = options.eol ?? "lf";
   const ensureTrailingNewline = options.ensureTrailingNewline ?? true;
   const quoteObjectProperties = options.quoteObjectProperties ?? false;
+  if (format === "xcstrings") {
+    return applyLineEndings(formatXcstringsLocale(locale, options.sourceLanguage ?? "en"), eol, ensureTrailingNewline);
+  }
   const json = JSON.stringify(locale, null, 2);
   const formatted =
     format === "json"
@@ -110,7 +115,7 @@ export async function formatLocaleForSnapshot(
   snapshot: LocaleFileSnapshot,
   options: FormatLocaleOptions = {}
 ): Promise<string> {
-  if (format === "json" || !snapshot.exists || !snapshot.objectRange) {
+  if (format === "json" || format === "xcstrings" || !snapshot.exists || !snapshot.objectRange) {
     return formatLocale(locale, format, options);
   }
 

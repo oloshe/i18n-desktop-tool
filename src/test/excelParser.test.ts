@@ -27,11 +27,21 @@ describe("excelParser", () => {
     expect(rows[0].key).toBe("hello");
     expect(rows[1].key).toBe("module-only");
   });
+
+  it("can read rows from multiple selected sheets", () => {
+    const rows = rowsFromExcelBuffer(createWorkbookBuffer(), { sheetNames: ["Other", "Data"], skipRows: 2, headerRow: 2 });
+
+    expect(rows.map((row) => row.key)).toEqual(["other-hello", "hello", "module-only"]);
+  });
 });
 
 function createWorkbookBuffer(): ArrayBuffer {
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([["other"]]), "Other");
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([["metadata"], ["key", "cn", "en"], ["other-hello", "鍏朵粬", "Other"]]),
+    "Other"
+  );
   XLSX.utils.book_append_sheet(
     workbook,
     XLSX.utils.aoa_to_sheet([

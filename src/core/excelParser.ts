@@ -5,6 +5,7 @@ const PREVIEW_LIMIT = 20;
 
 export interface ExcelReadOptions {
   sheetName?: string;
+  sheetNames?: string[];
   skipRows?: number;
   headerRow?: number;
 }
@@ -54,6 +55,13 @@ function readSheetMatrix(buffer: ArrayBuffer, sheetName?: string, sheetRows?: nu
   }
 
   return { sheetNames, activeSheetName, matrix };
+}
+
+function selectedSheetNames(allSheetNames: string[], options: ExcelReadOptions): string[] {
+  const names = options.sheetNames?.filter((name) => allSheetNames.includes(name)) ?? [];
+  if (names.length > 0) return Array.from(new Set(names));
+  if (options.sheetName && allSheetNames.includes(options.sheetName)) return [options.sheetName];
+  return [allSheetNames[0]];
 }
 
 function getHeaders(matrix: unknown[][], headerRow: number): string[] {
@@ -113,12 +121,26 @@ export function parseExcelBuffer(buffer: ArrayBuffer, options: ExcelReadOptions 
 export function rowsFromExcelBuffer(buffer: ArrayBuffer, options: ExcelReadOptions = {}): Array<Record<string, string>> {
   const skipRows = Math.max(0, options.skipRows ?? 0);
   const headerRow = Math.max(1, options.headerRow ?? 1);
-  const { matrix } = readSheetMatrix(buffer, options.sheetName);
-  const headers = getHeaders(matrix, headerRow);
-  const dataStartIndex = Math.max(skipRows, headerRow);
+  const workbook = XLSX.read(buffer, { type: "array" });
+  const sheetNames = workbook.SheetNames;
 
-  return matrix
-    .slice(dataStartIndex)
-    .filter((row) => hasFilledCell(row, headers))
-    .map((row) => rowToRecord(row, headers));
+  if (sheetNames.length === 0) {
+    throw new Error("Excel 鏂囦欢娌℃湁鍙鍙栫殑 sheet銆?");
+  }
+
+  return selectedSheetNames(sheetNames, options).flatMap((sheetName) => {
+    const sheet = workbook.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      defval: "",
+      raw: false
+    });
+    const headers = getHeaders(matrix, headerRow);
+    const dataStartIndex = Math.max(skipRows, headerRow);
+
+    return matrix
+      .slice(dataStartIndex)
+      .filter((row) => hasFilledCell(row, headers))
+      .map((row) => rowToRecord(row, headers));
+  });
 }
