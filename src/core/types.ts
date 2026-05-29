@@ -21,6 +21,7 @@ export interface ExcelPreview {
 }
 
 export interface ImportSettings {
+  excelUrl?: string;
   projectRoot: string;
   keyColumn: string;
   languageColumns: LanguageColumns;

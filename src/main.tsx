@@ -65,6 +65,11 @@ import {
   type ExcelReadOptions,
   type ExcelWorkbookInfo
 } from "./core/excelParser";
+import {
+  formatExcelHealthCheckReport,
+  inspectExcelBuffer,
+  type ExcelHealthCheckResult
+} from "./core/excelHealthCheck";
 
 const DEFAULT_LANGUAGE_COLUMNS: LanguageColumns = {
   "zh-CN": "中文",
@@ -82,7 +87,7 @@ const theme = createTheme({
   }
 });
 
-type StatusKind = "idle" | "reading" | "previewing" | "importing";
+type StatusKind = "idle" | "reading" | "previewing" | "checking" | "importing";
 type DiffLine = { kind: "same" | "added" | "removed"; prefix: string; text: string };
 type ExcelSource = { label: string; path?: string; bytes?: number[] };
 type WebDirectoryHandle = FileSystemDirectoryHandle;
@@ -125,6 +130,7 @@ function App() {
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<StatusKind>("idle");
   const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [healthCheckResult, setHealthCheckResult] = useState<ExcelHealthCheckResult | null>(null);
   const previewRequestRef = useRef(0);
   const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const splitByModule = moduleSplitMode === "keyPrefix";
@@ -199,6 +205,7 @@ function App() {
 
   const settings: ImportSettings = useMemo(
     () => ({
+      excelUrl: isHttpUrl(excelPath) ? excelPath.trim() : "",
       projectRoot,
       keyColumn,
       languageColumns,
@@ -224,6 +231,7 @@ function App() {
     }),
     [
       projectRoot,
+      excelPath,
       keyColumn,
       languageColumns,
       outputPathTemplate,
@@ -258,6 +266,7 @@ function App() {
   );
   const selectedPlan = plans.find((plan) => plan.path === selectedPlanPath) ?? plans[0];
   const isWorking = status !== "idle";
+  const canChooseProjectRoot = isTauriRuntime() || (window.isSecureContext && Boolean(window.showDirectoryPicker));
 
   async function chooseExcelFile() {
     setMessage("");
@@ -282,6 +291,23 @@ function App() {
     if (!selected || Array.isArray(selected)) return;
 
     await loadExcelFilePath(selected, "读取 Excel 失败");
+  }
+
+  async function loadExcelUrl() {
+    const url = excelPath.trim();
+    if (!url) {
+      setMessage("请先输入 Google Sheet 链接。");
+      return;
+    }
+
+    setStatus("reading");
+    await yieldToUi();
+    try {
+      await loadExcelSource(await loadGoogleSheetSource(url));
+    } catch (error) {
+      showError("读取 Google Sheet 失败", error);
+      setStatus("idle");
+    }
   }
 
   async function loadExcelFilePath(path: string, errorPrefix: string) {
@@ -316,18 +342,17 @@ function App() {
   async function chooseProjectRoot() {
     if (!isTauriRuntime()) {
       try {
-        const showDirectoryPicker = window.isSecureContext ? window.showDirectoryPicker : undefined;
-        if (showDirectoryPicker) {
-          const handle = await showDirectoryPicker({ mode: "readwrite" });
-          await ensureDirectoryPermission(handle);
-          setWebProjectDirectory(handle);
-          setProjectRoot(`[Web] ${handle.name}`);
-        } else {
-          const root = window.prompt("请输入启动 start-web.bat 这台电脑上的项目目录绝对路径：");
-          if (!root?.trim()) return;
+        const showDirectoryPicker = window.showDirectoryPicker;
+        if (!window.isSecureContext || !showDirectoryPicker) {
           setWebProjectDirectory(null);
-          setProjectRoot(root.trim());
+          setProjectRoot("");
+          setMessage("当前浏览器环境不支持目录授权，可直接生成预览；执行导入时会下载文件。");
+          return;
         }
+        const handle = await showDirectoryPicker({ mode: "readwrite" });
+        await ensureDirectoryPermission(handle);
+        setWebProjectDirectory(handle);
+        setProjectRoot(`[本机目录] ${handle.name}`);
         setPlans([]);
         setSelectedPlanPath("");
       } catch (error) {
@@ -389,6 +414,9 @@ function App() {
 
   function applyConfig(config: SavedProjectConfig) {
     setProjectName(config.projectName);
+    setExcelPath(config.excelUrl ?? "");
+    setExcelSource(null);
+    setPreview(null);
     setProjectRoot(config.projectRoot);
     setKeyColumn(config.keyColumn);
     setLanguageColumns(config.languageColumns);
@@ -450,7 +478,7 @@ function App() {
         updatedAt: new Date().toISOString(),
         ...settings
       };
-      await navigator.clipboard.writeText(serializeProjectConfig(config));
+      await copyTextToClipboard(serializeProjectConfig(config));
       setMessage("配置已复制到剪贴板。");
     } catch (error) {
       showError("复制配置失败", error);
@@ -538,7 +566,7 @@ function App() {
       setMessage("请先选择或拖入 Excel 文件。");
       return;
     }
-    if (!projectRoot) {
+    if (isTauriRuntime() && !projectRoot) {
       setMessage("请先选择项目目录。");
       return;
     }
@@ -667,6 +695,31 @@ function App() {
     }
   }
 
+  async function runExcelHealthCheck() {
+    if (!excelSource) {
+      setMessage("请先选择或拖入 Excel 文件。");
+      return;
+    }
+
+    setStatus("checking");
+    setMessage("");
+    await yieldToUi();
+    try {
+      const result = await inspectExcelSource(excelSource, keyColumn, languageColumns, {
+        sheetName,
+        sheetNames: selectedSheetNames,
+        skipRows,
+        headerRow
+      });
+      setHealthCheckResult(result);
+      setMessage("Excel 体检完成。");
+    } catch (error) {
+      showError("Excel 体检失败", error);
+    } finally {
+      setStatus("idle");
+    }
+  }
+
   async function runImport() {
     if (plans.length === 0) {
       setMessage("请先生成写入预览。");
@@ -680,7 +733,14 @@ function App() {
 
     setStatus("importing");
     try {
-      await Promise.all(plans.map((plan) => writeOutputContent(plan.path, plan.nextContent, webProjectDirectory, projectRoot)));
+      const importDirectory = isTauriRuntime() ? webProjectDirectory : await chooseWebDirectoryForImport();
+      if (!isTauriRuntime() && !importDirectory) {
+        await downloadPreviewFiles();
+        setMessage("已下载预览文件。");
+        setStatus("idle");
+        return;
+      }
+      await Promise.all(plans.map((plan) => writeOutputContent(plan.path, plan.nextContent, importDirectory, projectRoot)));
       setSummary({
         changedFiles: plans.length,
         lines: plans.map((plan) => ({
@@ -697,6 +757,26 @@ function App() {
     } finally {
       setStatus("idle");
     }
+  }
+
+  async function downloadPreviewFiles() {
+    const downloadablePlans = plans.filter((plan) => !plan.error);
+    if (downloadablePlans.length === 0) {
+      setMessage("没有可下载的预览文件。");
+      return;
+    }
+
+    if (downloadablePlans.length === 1) {
+      const plan = downloadablePlans[0];
+      downloadTextFile(getFileName(plan.path), plan.nextContent);
+      return;
+    }
+
+    const files = downloadablePlans.map((plan) => ({
+      path: getPreviewDownloadPath(plan.path, projectRoot),
+      content: plan.nextContent
+    }));
+    downloadBlobFile("i18n-preview-files.zip", createZipBlob(files));
   }
 
   function showError(prefix: string, error: unknown) {
@@ -755,6 +835,7 @@ function App() {
           <Typography color="text.secondary">从 Excel 生成并合并项目 locale 文件</Typography>
         </div>
         <Stack className="actions" direction="row" spacing={1}>
+          <Button onClick={runExcelHealthCheck} disabled={isWorking} variant="outlined">Excel体检</Button>
           <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">生成预览</Button>
           <Button onClick={runImport} disabled={isWorking} variant="contained">执行导入</Button>
         </Stack>
@@ -772,24 +853,30 @@ function App() {
                   <TextField
                     label="Excel 文件"
                     value={excelPath}
-                    placeholder="选择或拖入 .xlsx / .xls 文件"
-                    slotProps={{ input: { readOnly: true } }}
+                    onChange={(event) => setExcelPath(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && isGoogleSheetUrl(excelPath)) void loadExcelUrl();
+                    }}
+                    placeholder="选择、拖入 .xlsx/.xls，或粘贴 Google Sheet 链接"
                     size="small"
                     fullWidth
                   />
                   <Button onClick={chooseExcelFile} disabled={isWorking} variant="outlined">选择</Button>
+                  <Button onClick={loadExcelUrl} disabled={isWorking || !isGoogleSheetUrl(excelPath)} variant="outlined">读取链接</Button>
                 </Stack>
-                <Stack className="inline" direction="row" spacing={1}>
-                  <TextField
-                    label="项目目录"
-                    value={projectRoot}
-                    placeholder="选择写入的项目根目录"
-                    slotProps={{ input: { readOnly: true } }}
-                    size="small"
-                    fullWidth
-                  />
-                  <Button onClick={chooseProjectRoot} variant="outlined">选择</Button>
-                </Stack>
+                {canChooseProjectRoot && (
+                  <Stack className="inline" direction="row" spacing={1}>
+                    <TextField
+                      label="项目目录"
+                      value={projectRoot}
+                      placeholder="选择写入的项目根目录"
+                      slotProps={{ input: { readOnly: true } }}
+                      size="small"
+                      fullWidth
+                    />
+                    <Button onClick={chooseProjectRoot} variant="outlined">选择</Button>
+                  </Stack>
+                )}
               </Stack>
             </Paper>
 
@@ -996,7 +1083,10 @@ function App() {
         <Paper className="panel wide previewPanel" variant="outlined">
           <div className="panelHead">
             <Typography component="h2" variant="h6">写入预览</Typography>
-            <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">刷新预览</Button>
+            <Stack direction="row" spacing={1}>
+              <Button onClick={downloadPreviewFiles} disabled={isWorking || plans.length === 0} variant="outlined">下载文件</Button>
+              <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">刷新预览</Button>
+            </Stack>
           </div>
           {plans.length > 0 ? (
             <div className="previewSplit">
@@ -1064,6 +1154,7 @@ function App() {
       <StatusBar status={status} plans={plans.length} previewRows={preview?.rows.length ?? 0} />
       <OperationDialog status={status} />
       {summary && <ImportSummaryDialog summary={summary} onClose={closeSummary} />}
+      {healthCheckResult && <ExcelHealthCheckDialog result={healthCheckResult} onClose={() => setHealthCheckResult(null)} />}
     </main>
   );
 }
@@ -1089,6 +1180,19 @@ function StatusBar({ status, plans, previewRows }: { status: StatusKind; plans: 
 
 function OperationDialog({ status }: { status: StatusKind }) {
   if (status === "idle") return null;
+  if (status === "checking") {
+    return (
+      <Dialog open aria-live="polite" aria-labelledby="operation-dialog-title">
+        <DialogContent className="compactDialog">
+          <CircularProgress size={42} />
+          <Box>
+            <DialogTitle id="operation-dialog-title" sx={{ p: 0, mb: 1 }}>Excel体检</DialogTitle>
+            <Typography color="text.secondary">正在检查重复 key、空 key 行和缺失翻译。</Typography>
+          </Box>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   const title =
     status === "reading" ? "导入 Excel" : status === "previewing" ? "生成写入预览" : "写入文件";
@@ -1128,6 +1232,34 @@ function ImportSummaryDialog({ summary, onClose }: { summary: ImportSummary; onC
         </div>
       </DialogContent>
       <DialogActions>
+        <Button onClick={onClose} variant="contained">完成</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function ExcelHealthCheckDialog({ result, onClose }: { result: ExcelHealthCheckResult; onClose: () => void }) {
+  const report = formatExcelHealthCheckReport(result);
+
+  async function copyReport() {
+    await copyTextToClipboard(report);
+  }
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth aria-labelledby="excel-health-check-title">
+      <DialogTitle id="excel-health-check-title">Excel体检结果</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2}>
+          <Stack direction="row" spacing={1}>
+            <Typography>重复key：{result.duplicateKeys.length}</Typography>
+            <Typography>空key行：{result.emptyKeyRows.length}</Typography>
+            <Typography>缺失翻译：{result.missingTranslations.length}</Typography>
+          </Stack>
+          <TextField value={report} multiline minRows={16} fullWidth slotProps={{ input: { readOnly: true } }} />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={copyReport} variant="outlined">一键复制</Button>
         <Button onClick={onClose} variant="contained">完成</Button>
       </DialogActions>
     </Dialog>
@@ -1229,12 +1361,58 @@ function getFileName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+function getPreviewDownloadPath(path: string, projectRoot: string): string {
+  const normalizedPath = path.split("\\").join("/");
+  const normalizedRoot = projectRoot.split("\\").join("/").replace(/\/+$/, "");
+  if (normalizedRoot && normalizedPath.startsWith(`${normalizedRoot}/`)) {
+    return normalizeRelativePath(normalizedPath.slice(normalizedRoot.length + 1));
+  }
+  return normalizeRelativePath(normalizedPath);
+}
+
 function cssEscape(value: string): string {
   return globalThis.CSS?.escape(value) ?? value.replace(/["\\]/g, "\\$&");
 }
 
 function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
+}
+
+async function loadGoogleSheetSource(url: string): Promise<ExcelSource> {
+  const exportUrl = toGoogleSheetExportUrl(url);
+  const response = await fetch(exportUrl);
+  if (!response.ok) {
+    throw new Error(`Google Sheet 下载失败：${response.status}`);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const buffer = await response.arrayBuffer();
+  if (contentType.includes("text/html")) {
+    throw new Error("Google Sheet 返回了网页内容，请确认链接有访问权限。");
+  }
+
+  return { label: url, bytes: arrayBufferToBytes(buffer) };
+}
+
+function isGoogleSheetUrl(value: string): boolean {
+  return /https:\/\/docs\.google\.com\/spreadsheets\/d\/[^/]+/i.test(value.trim());
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function toGoogleSheetExportUrl(value: string): string {
+  const url = new URL(value.trim());
+  const match = url.pathname.match(/\/spreadsheets\/d\/([^/]+)/);
+  if (!match) {
+    throw new Error("请输入有效的 Google Sheet 链接。");
+  }
+  const gid = url.searchParams.get("gid") ?? url.hash.match(/gid=(\d+)/)?.[1];
+  const exportUrl = new URL(`https://docs.google.com/spreadsheets/d/${match[1]}/export`);
+  exportUrl.searchParams.set("format", "xlsx");
+  if (gid) exportUrl.searchParams.set("gid", gid);
+  return exportUrl.toString();
 }
 
 async function chooseBrowserFile(accept: string): Promise<File | null> {
@@ -1262,6 +1440,24 @@ async function chooseBrowserFile(accept: string): Promise<File | null> {
   });
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error("当前浏览器不支持复制到剪贴板。");
+}
+
 async function ensureDirectoryPermission(handle: WebDirectoryHandle): Promise<void> {
   const queryPermission = handle.queryPermission?.bind(handle);
   const requestPermission = handle.requestPermission?.bind(handle);
@@ -1269,6 +1465,20 @@ async function ensureDirectoryPermission(handle: WebDirectoryHandle): Promise<vo
   if ((await queryPermission({ mode: "readwrite" })) === "granted") return;
   if ((await requestPermission({ mode: "readwrite" })) !== "granted") {
     throw new Error("没有获得目录读写权限。");
+  }
+}
+
+async function chooseWebDirectoryForImport(): Promise<WebDirectoryHandle | null> {
+  const showDirectoryPicker = window.showDirectoryPicker;
+  if (!window.isSecureContext || !showDirectoryPicker) return null;
+
+  try {
+    const handle = await showDirectoryPicker({ mode: "readwrite" });
+    await ensureDirectoryPermission(handle);
+    return handle;
+  } catch (error) {
+    if (isAbortError(error)) return null;
+    throw error;
   }
 }
 
@@ -1286,12 +1496,7 @@ async function readOutputLocaleSnapshot(
   projectRoot: string
 ): Promise<LocaleFileSnapshot> {
   if (!directory && !isTauriRuntime()) {
-    const response = await postServerFileApi<{ exists: boolean; content: string }>("/__i18n/fs/read", {
-      root: projectRoot,
-      path
-    });
-    if (!response.exists) return { exists: false, content: "", locale: {}, eol: "lf" };
-    return createLocaleSnapshotFromContent(response.content, format);
+    return { exists: false, content: "", locale: {}, eol: "lf" };
   }
   if (!directory) return readLocaleFileSnapshot(path, format);
 
@@ -1316,8 +1521,7 @@ async function writeOutputContent(
 ): Promise<void> {
   if (!directory) {
     if (!isTauriRuntime()) {
-      await postServerFileApi("/__i18n/fs/write", { root: projectRoot, path, content });
-      return;
+      throw new Error("请先选择当前电脑上的项目目录。");
     }
     await writeLocaleContent(path, content);
     return;
@@ -1339,17 +1543,6 @@ function createLocaleSnapshotFromContent(content: string, format: OutputFormat):
     eol: detectEol(content),
     objectRange: format === "json" || format === "xcstrings" || !content.trim() ? undefined : findLocaleObjectRange(content)
   };
-}
-
-async function postServerFileApi<T = unknown>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(data.error || `请求失败：${response.status}`);
-  return data;
 }
 
 async function getBrowserFileHandle(
@@ -1378,12 +1571,108 @@ function normalizeRelativePath(path: string): string {
 
 function downloadTextFile(fileName: string, content: string): void {
   const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  downloadBlobFile(fileName, blob);
+}
+
+function downloadBlobFile(fileName: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = fileName;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function createZipBlob(files: Array<{ path: string; content: string }>): Blob {
+  const encoder = new TextEncoder();
+  const fileRecords: Array<{ name: Uint8Array; data: Uint8Array; crc: number; offset: number }> = [];
+  const localParts: Uint8Array[] = [];
+  let offset = 0;
+
+  files.forEach((file) => {
+    const name = encoder.encode(file.path);
+    const data = encoder.encode(file.content);
+    const crc = crc32(data);
+    const header = createZipLocalHeader(name, data, crc);
+    localParts.push(header, data);
+    fileRecords.push({ name, data, crc, offset });
+    offset += header.length + data.length;
+  });
+
+  const centralParts = fileRecords.map((record) => createZipCentralHeader(record));
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = createZipEndRecord(fileRecords.length, centralSize, offset);
+  return new Blob([...localParts, ...centralParts, end].map(toBlobPart), { type: "application/zip" });
+}
+
+function toBlobPart(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function createZipLocalHeader(name: Uint8Array, data: Uint8Array, crc: number): Uint8Array {
+  const header = new Uint8Array(30 + name.length);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x04034b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 0x0800, true);
+  view.setUint16(8, 0, true);
+  setZipDateTime(view, 10);
+  view.setUint32(14, crc, true);
+  view.setUint32(18, data.length, true);
+  view.setUint32(22, data.length, true);
+  view.setUint16(26, name.length, true);
+  header.set(name, 30);
+  return header;
+}
+
+function createZipCentralHeader(record: { name: Uint8Array; data: Uint8Array; crc: number; offset: number }): Uint8Array {
+  const header = new Uint8Array(46 + record.name.length);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x02014b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 20, true);
+  view.setUint16(8, 0x0800, true);
+  view.setUint16(10, 0, true);
+  setZipDateTime(view, 12);
+  view.setUint32(16, record.crc, true);
+  view.setUint32(20, record.data.length, true);
+  view.setUint32(24, record.data.length, true);
+  view.setUint16(28, record.name.length, true);
+  view.setUint32(42, record.offset, true);
+  header.set(record.name, 46);
+  return header;
+}
+
+function createZipEndRecord(fileCount: number, centralSize: number, centralOffset: number): Uint8Array {
+  const header = new Uint8Array(22);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(8, fileCount, true);
+  view.setUint16(10, fileCount, true);
+  view.setUint32(12, centralSize, true);
+  view.setUint32(16, centralOffset, true);
+  return header;
+}
+
+function setZipDateTime(view: DataView, offset: number): void {
+  const now = new Date();
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  view.setUint16(offset, time, true);
+  view.setUint16(offset + 2, date, true);
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -1424,6 +1713,19 @@ function readExcelRows(source: ExcelSource, options: ExcelReadOptions): Promise<
   }
   if (source.path) return invoke("rows_from_excel", { path: source.path, options });
   return invoke("rows_from_excel_bytes", { bytes: source.bytes ?? [], options });
+}
+
+function inspectExcelSource(
+  source: ExcelSource,
+  keyColumn: string,
+  languageColumns: LanguageColumns,
+  options: ExcelReadOptions
+): Promise<ExcelHealthCheckResult> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(inspectExcelBuffer(bytesToArrayBuffer(source.bytes ?? []), keyColumn, languageColumns, options));
+  }
+  if (source.path) return invoke("inspect_excel", { path: source.path, keyColumn, languageColumns, options });
+  return Promise.resolve(inspectExcelBuffer(bytesToArrayBuffer(source.bytes ?? []), keyColumn, languageColumns, options));
 }
 
 function bytesToArrayBuffer(bytes: number[]): ArrayBuffer {

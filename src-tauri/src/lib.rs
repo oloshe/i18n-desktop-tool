@@ -32,6 +32,37 @@ struct ExcelPreview {
   rows: Vec<HashMap<String, String>>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ExcelHealthCheckRowRef {
+  sheet_name: String,
+  row_number: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExcelDuplicateKeyIssue {
+  key: String,
+  locations: Vec<ExcelHealthCheckRowRef>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExcelMissingTranslationIssue {
+  sheet_name: String,
+  row_number: usize,
+  key: String,
+  lang: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExcelHealthCheckResult {
+  duplicate_keys: Vec<ExcelDuplicateKeyIssue>,
+  empty_key_rows: Vec<ExcelHealthCheckRowRef>,
+  missing_translations: Vec<ExcelMissingTranslationIssue>,
+}
+
 #[tauri::command]
 async fn read_excel_workbook_info(path: String, sheet_name: Option<String>) -> Result<ExcelWorkbookInfo, String> {
   tauri::async_runtime::spawn_blocking(move || {
@@ -95,6 +126,21 @@ async fn rows_from_excel_bytes(bytes: Vec<u8>, options: ExcelReadOptions) -> Res
   .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn inspect_excel(
+  path: String,
+  key_column: String,
+  language_columns: HashMap<String, String>,
+  options: ExcelReadOptions,
+) -> Result<ExcelHealthCheckResult, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let mut workbook = open_workbook_auto(path).map_err(|error| error.to_string())?;
+    inspect_workbook(&mut workbook, &key_column, &language_columns, options)
+  })
+  .await
+  .map_err(|error| error.to_string())?
+}
+
 fn workbook_info<RS>(workbook: &mut Sheets<RS>, sheet_name: Option<&str>) -> Result<ExcelWorkbookInfo, String>
 where
   RS: std::io::Read + std::io::Seek,
@@ -150,6 +196,91 @@ where
   }
 
   Ok(rows)
+}
+
+fn inspect_workbook<RS>(
+  workbook: &mut Sheets<RS>,
+  key_column: &str,
+  language_columns: &HashMap<String, String>,
+  options: ExcelReadOptions,
+) -> Result<ExcelHealthCheckResult, String>
+where
+  RS: std::io::Read + std::io::Seek,
+{
+  if key_column.trim().is_empty() {
+    return Err("Key column is required.".to_string());
+  }
+
+  let languages: Vec<(&String, &String)> = language_columns
+    .iter()
+    .filter(|(lang, column)| !lang.trim().is_empty() && !column.trim().is_empty())
+    .collect();
+  if languages.is_empty() {
+    return Err("At least one language column is required.".to_string());
+  }
+
+  let skip_rows = options.skip_rows.unwrap_or(0);
+  let header_row = options.header_row.unwrap_or(1).max(1);
+  let sheet_names = workbook.sheet_names().to_owned();
+  let data_start_index = skip_rows.max(header_row);
+  let mut duplicate_map: HashMap<String, Vec<ExcelHealthCheckRowRef>> = HashMap::new();
+  let mut empty_key_rows = Vec::new();
+  let mut missing_translations = Vec::new();
+
+  for sheet_name in active_sheet_names(&sheet_names, options.sheet_name.as_deref(), options.sheet_names.as_deref())? {
+    let matrix = sheet_matrix(workbook, &sheet_name)?;
+    let headers = get_headers(&matrix, header_row)?;
+    let key_index = column_index(&headers, key_column, &sheet_name)?;
+    let language_indexes: Vec<(&String, usize)> = languages
+      .iter()
+      .map(|(lang, column)| column_index(&headers, column, &sheet_name).map(|index| (*lang, index)))
+      .collect::<Result<Vec<_>, _>>()?;
+
+    for (offset, row) in matrix.iter().skip(data_start_index).enumerate() {
+      let row_number = data_start_index + offset + 1;
+      if !has_filled_cell(row, headers.len()) {
+        continue;
+      }
+
+      let key = row.get(key_index).map(|value| value.trim()).unwrap_or_default();
+      if key.is_empty() {
+        empty_key_rows.push(ExcelHealthCheckRowRef { sheet_name: sheet_name.clone(), row_number });
+        continue;
+      }
+
+      let filled_language_count = language_indexes
+        .iter()
+        .filter(|(_, index)| row.get(*index).map(|value| !value.trim().is_empty()).unwrap_or(false))
+        .count();
+      if filled_language_count == 0 {
+        continue;
+      }
+
+      duplicate_map
+        .entry(key.to_string())
+        .or_default()
+        .push(ExcelHealthCheckRowRef { sheet_name: sheet_name.clone(), row_number });
+
+      for (lang, index) in &language_indexes {
+        if row.get(*index).map(|value| value.trim().is_empty()).unwrap_or(true) {
+          missing_translations.push(ExcelMissingTranslationIssue {
+            sheet_name: sheet_name.clone(),
+            row_number,
+            key: key.to_string(),
+            lang: (*lang).to_string(),
+          });
+        }
+      }
+    }
+  }
+
+  let duplicate_keys = duplicate_map
+    .into_iter()
+    .filter(|(_, locations)| locations.len() > 1)
+    .map(|(key, locations)| ExcelDuplicateKeyIssue { key, locations })
+    .collect();
+
+  Ok(ExcelHealthCheckResult { duplicate_keys, empty_key_rows, missing_translations })
 }
 
 fn active_sheet_name(sheet_names: &[String], requested: Option<&str>) -> Result<String, String> {
@@ -231,6 +362,13 @@ fn row_to_record(row: &[String], headers: &[String]) -> HashMap<String, String> 
     .collect()
 }
 
+fn column_index(headers: &[String], column: &str, sheet_name: &str) -> Result<usize, String> {
+  headers
+    .iter()
+    .position(|header| header == column)
+    .ok_or_else(|| format!("Sheet \"{}\" is missing column \"{}\".", sheet_name, column))
+}
+
 fn is_importable_row(row: &[String], width: usize) -> bool {
   row.iter().take(width).filter(|value| !value.trim().is_empty()).count() > 1
 }
@@ -259,7 +397,8 @@ pub fn run() {
       preview_excel,
       preview_excel_bytes,
       rows_from_excel,
-      rows_from_excel_bytes
+      rows_from_excel_bytes,
+      inspect_excel
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

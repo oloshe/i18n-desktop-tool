@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -19,15 +19,6 @@ const host = process.env.WEB_HOST || "0.0.0.0";
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
-    if (url.pathname === "/__i18n/fs/read" && request.method === "POST") {
-      await handleReadFile(request, response);
-      return;
-    }
-    if (url.pathname === "/__i18n/fs/write" && request.method === "POST") {
-      await handleWriteFile(request, response);
-      return;
-    }
-
     const filePath = await resolveFilePath(url.pathname);
     response.writeHead(200, {
       "Content-Type": getContentType(filePath),
@@ -37,10 +28,6 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 500;
     const message = status === 404 ? "Not found" : error instanceof Error ? error.message : String(error);
-    if (request.url?.startsWith("/__i18n/")) {
-      sendJson(response, status, { error: message });
-      return;
-    }
     response.writeHead(status, { "Content-Type": "text/plain;charset=utf-8" });
     response.end(message);
   }
@@ -53,53 +40,6 @@ server.listen(port, host, () => {
     console.log(`LAN:     http://${address}:${port}/`);
   });
 });
-
-async function handleReadFile(request, response) {
-  const body = await readJsonBody(request);
-  const filePath = resolveProjectFilePath(body.root, body.path);
-  if (!existsSync(filePath)) {
-    sendJson(response, 200, { exists: false, content: "" });
-    return;
-  }
-  sendJson(response, 200, { exists: true, content: await readFile(filePath, "utf8") });
-}
-
-async function handleWriteFile(request, response) {
-  const body = await readJsonBody(request);
-  const filePath = resolveProjectFilePath(body.root, body.path);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, String(body.content ?? ""), "utf8");
-  sendJson(response, 200, { ok: true });
-}
-
-function resolveProjectFilePath(root, relativePath) {
-  if (typeof root !== "string" || !path.isAbsolute(root)) {
-    throw new HttpError(400, "Project root must be an absolute path on the server machine.");
-  }
-  if (typeof relativePath !== "string" || !relativePath.trim()) {
-    throw new HttpError(400, "File path is required.");
-  }
-
-  const rootPath = path.resolve(root);
-  const filePath = path.resolve(rootPath, relativePath.split("\\").join("/"));
-  if (filePath !== rootPath && !filePath.startsWith(`${rootPath}${path.sep}`)) {
-    throw new HttpError(400, "File path must stay inside the project root.");
-  }
-  return filePath;
-}
-
-async function readJsonBody(request) {
-  const chunks = [];
-  for await (const chunk of request) {
-    chunks.push(chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-}
-
-function sendJson(response, status, value) {
-  response.writeHead(status, { "Content-Type": "application/json;charset=utf-8" });
-  response.end(JSON.stringify(value));
-}
 
 async function resolveFilePath(urlPath) {
   const decodedPath = decodeURIComponent(urlPath);
