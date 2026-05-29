@@ -34,7 +34,15 @@ import {
   serializeProjectConfig
 } from "./core/configStore";
 import { generateLocales, mergeLocaleObjects, resolveLocalePath } from "./core/localeGenerator";
-import { formatLocaleForSnapshot, readLocaleFileSnapshot, resolveProjectFile, writeLocaleContent } from "./core/localeFileWriter";
+import {
+  detectEol,
+  formatLocaleForSnapshot,
+  readLocaleFileSnapshot,
+  resolveProjectFile,
+  writeLocaleContent,
+  type LocaleFileSnapshot
+} from "./core/localeFileWriter";
+import { findLocaleObjectRange, parseLocaleContent } from "./core/localeFileReader";
 import { generateXcstringsLocale } from "./core/xcstrings";
 import type {
   ExcelPreview,
@@ -50,7 +58,13 @@ import type {
   OutputFormat,
   SavedProjectConfig
 } from "./core/types";
-import type { ExcelReadOptions, ExcelWorkbookInfo } from "./core/excelParser";
+import {
+  parseExcelBuffer,
+  readExcelWorkbookInfo as readExcelWorkbookInfoFromBuffer,
+  rowsFromExcelBuffer,
+  type ExcelReadOptions,
+  type ExcelWorkbookInfo
+} from "./core/excelParser";
 
 const DEFAULT_LANGUAGE_COLUMNS: LanguageColumns = {
   "zh-CN": "中文",
@@ -71,6 +85,7 @@ const theme = createTheme({
 type StatusKind = "idle" | "reading" | "previewing" | "importing";
 type DiffLine = { kind: "same" | "added" | "removed"; prefix: string; text: string };
 type ExcelSource = { label: string; path?: string; bytes?: number[] };
+type WebDirectoryHandle = FileSystemDirectoryHandle;
 interface ImportSummary {
   changedFiles: number;
   lines: Array<{ lang: string; moduleName: string; added: number; modified: number; deleted: number }>;
@@ -80,6 +95,7 @@ function App() {
   const [excelPath, setExcelPath] = useState("");
   const [excelSource, setExcelSource] = useState<ExcelSource | null>(null);
   const [preview, setPreview] = useState<ExcelPreview | null>(null);
+  const [webProjectDirectory, setWebProjectDirectory] = useState<WebDirectoryHandle | null>(null);
   const [sheetName, setSheetName] = useState("");
   const [selectedSheetNames, setSelectedSheetNames] = useState<string[]>([]);
   const [skipRows, setSkipRows] = useState(0);
@@ -245,6 +261,20 @@ function App() {
 
   async function chooseExcelFile() {
     setMessage("");
+    if (!isTauriRuntime()) {
+      const file = await chooseBrowserFile(".xlsx,.xls");
+      if (!file) return;
+      setStatus("reading");
+      await yieldToUi();
+      try {
+        await loadExcelSource({ label: file.name, bytes: arrayBufferToBytes(await file.arrayBuffer()) });
+      } catch (error) {
+        showError("读取 Excel 失败", error);
+        setStatus("idle");
+      }
+      return;
+    }
+
     const selected = await open({
       multiple: false,
       filters: [{ name: "Excel", extensions: ["xlsx", "xls"] }]
@@ -284,8 +314,32 @@ function App() {
   }
 
   async function chooseProjectRoot() {
+    if (!isTauriRuntime()) {
+      try {
+        const showDirectoryPicker = window.isSecureContext ? window.showDirectoryPicker : undefined;
+        if (showDirectoryPicker) {
+          const handle = await showDirectoryPicker({ mode: "readwrite" });
+          await ensureDirectoryPermission(handle);
+          setWebProjectDirectory(handle);
+          setProjectRoot(`[Web] ${handle.name}`);
+        } else {
+          const root = window.prompt("请输入启动 start-web.bat 这台电脑上的项目目录绝对路径：");
+          if (!root?.trim()) return;
+          setWebProjectDirectory(null);
+          setProjectRoot(root.trim());
+        }
+        setPlans([]);
+        setSelectedPlanPath("");
+      } catch (error) {
+        if (isAbortError(error)) return;
+        showError("选择项目目录失败", error);
+      }
+      return;
+    }
+
     const selected = await open({ directory: true, multiple: false });
     if (!selected || Array.isArray(selected)) return;
+    setWebProjectDirectory(null);
     setProjectRoot(selected);
   }
 
@@ -413,6 +467,14 @@ function App() {
 
   async function exportConfig() {
     const targetConfig = saveProjectConfig(projectName, settings, selectedConfigId || undefined);
+    if (!isTauriRuntime()) {
+      downloadTextFile(`${targetConfig.projectName}.i18n-config.json`, serializeProjectConfig(targetConfig));
+      setConfigs(loadProjectConfigs());
+      setSelectedConfigId(targetConfig.id);
+      setMessage("配置已导出。");
+      return;
+    }
+
     const path = await save({
       defaultPath: `${targetConfig.projectName}.i18n-config.json`,
       filters: [{ name: "i18n config", extensions: ["json"] }]
@@ -430,6 +492,26 @@ function App() {
   }
 
   async function importConfig() {
+    if (!isTauriRuntime()) {
+      const file = await chooseBrowserFile(".json");
+      if (!file) return;
+
+      setStatus("importing");
+      try {
+        const imported = parseProjectConfigExport(await file.text());
+        const saved = saveProjectConfig(imported.projectName, imported, imported.id);
+        setConfigs(loadProjectConfigs());
+        setSelectedConfigId(saved.id);
+        applyConfig(saved);
+        setMessage("配置已导入。");
+      } catch (error) {
+        showError("导入配置失败", error);
+      } finally {
+        setStatus("idle");
+      }
+      return;
+    }
+
     const path = await open({
       multiple: false,
       filters: [{ name: "i18n config", extensions: ["json"] }]
@@ -468,8 +550,8 @@ function App() {
       if (isXcstringsOutput) {
         const sourceLanguage = getSourceLanguage(languageColumns);
         const locale = generateXcstringsLocale(rows, keyColumn, languageColumns);
-        const path = await resolveProjectFile(projectRoot, getXcstringsOutputPath(outputPathTemplate));
-        const snapshot = await readLocaleFileSnapshot(path, outputFormat);
+        const path = await resolveOutputFilePath(projectRoot, getXcstringsOutputPath(outputPathTemplate), webProjectDirectory);
+        const snapshot = await readOutputLocaleSnapshot(path, outputFormat, webProjectDirectory, projectRoot);
         const merged = mergeLocaleObjects(snapshot.locale, locale, mergeStrategy, missingKeyStrategy);
         const deletedKeys = missingKeyStrategy === "remove" ? getDeletedLocaleKeys(snapshot.locale, merged.mergedLocale) : [];
         const nextContent = await formatLocaleForSnapshot(merged.mergedLocale, outputFormat, snapshot, {
@@ -516,7 +598,7 @@ function App() {
         for (const [moduleName, locale] of Object.entries(modules)) {
           await yieldToUi();
           const relativePath = resolveLocalePath(outputPathTemplate, lang, templateSplitsFiles ? moduleName : undefined);
-          const path = await resolveProjectFile(projectRoot, relativePath);
+          const path = await resolveOutputFilePath(projectRoot, relativePath, webProjectDirectory);
           const localeForPath =
             moduleSplitMode !== "none" && !templateSplitsFiles && moduleName && !removeModulePrefix ? { [moduleName]: locale } : locale;
           const existing = writes.get(path);
@@ -532,7 +614,7 @@ function App() {
       for (const { lang, path, locale, modules } of writes.values()) {
         await yieldToUi();
         try {
-          const snapshot = await readLocaleFileSnapshot(path, outputFormat);
+          const snapshot = await readOutputLocaleSnapshot(path, outputFormat, webProjectDirectory, projectRoot);
           const merged = mergeLocaleObjects(snapshot.locale, locale, mergeStrategy, missingKeyStrategy);
           const deletedKeys = missingKeyStrategy === "remove" ? getDeletedLocaleKeys(snapshot.locale, merged.mergedLocale) : [];
           const nextContent = await formatLocaleForSnapshot(merged.mergedLocale, outputFormat, snapshot, {
@@ -598,7 +680,7 @@ function App() {
 
     setStatus("importing");
     try {
-      await Promise.all(plans.map((plan) => writeLocaleContent(plan.path, plan.nextContent)));
+      await Promise.all(plans.map((plan) => writeOutputContent(plan.path, plan.nextContent, webProjectDirectory, projectRoot)));
       setSummary({
         changedFiles: plans.length,
         lines: plans.map((plan) => ({
@@ -1155,6 +1237,163 @@ function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+async function chooseBrowserFile(accept: string): Promise<File | null> {
+  if ("showOpenFilePicker" in window) {
+    try {
+      const showOpenFilePicker = window.showOpenFilePicker;
+      if (!showOpenFilePicker) throw new Error("当前浏览器不支持文件选择。");
+      const [handle] = await showOpenFilePicker({
+        multiple: false,
+        types: [{ description: "Files", accept: { "*/*": accept.split(",") } }]
+      });
+      return handle ? await handle.getFile() : null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      throw error;
+    }
+  }
+
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.onchange = () => resolve(input.files?.[0] ?? null);
+    input.click();
+  });
+}
+
+async function ensureDirectoryPermission(handle: WebDirectoryHandle): Promise<void> {
+  const queryPermission = handle.queryPermission?.bind(handle);
+  const requestPermission = handle.requestPermission?.bind(handle);
+  if (!queryPermission || !requestPermission) return;
+  if ((await queryPermission({ mode: "readwrite" })) === "granted") return;
+  if ((await requestPermission({ mode: "readwrite" })) !== "granted") {
+    throw new Error("没有获得目录读写权限。");
+  }
+}
+
+async function resolveOutputFilePath(projectRoot: string, relativePath: string, directory: WebDirectoryHandle | null): Promise<string> {
+  const normalized = normalizeRelativePath(relativePath);
+  if (directory) return normalized;
+  if (!isTauriRuntime()) return normalized;
+  return resolveProjectFile(projectRoot, normalized);
+}
+
+async function readOutputLocaleSnapshot(
+  path: string,
+  format: OutputFormat,
+  directory: WebDirectoryHandle | null,
+  projectRoot: string
+): Promise<LocaleFileSnapshot> {
+  if (!directory && !isTauriRuntime()) {
+    const response = await postServerFileApi<{ exists: boolean; content: string }>("/__i18n/fs/read", {
+      root: projectRoot,
+      path
+    });
+    if (!response.exists) return { exists: false, content: "", locale: {}, eol: "lf" };
+    return createLocaleSnapshotFromContent(response.content, format);
+  }
+  if (!directory) return readLocaleFileSnapshot(path, format);
+
+  try {
+    await ensureDirectoryPermission(directory);
+    const handle = await getBrowserFileHandle(directory, path, false);
+    if (!handle) return { exists: false, content: "", locale: {}, eol: "lf" };
+
+    const content = await (await handle.getFile()).text();
+    return createLocaleSnapshotFromContent(content, format);
+  } catch (error) {
+    if (isMissingBrowserFileError(error)) return { exists: false, content: "", locale: {}, eol: "lf" };
+    throw error;
+  }
+}
+
+async function writeOutputContent(
+  path: string,
+  content: string,
+  directory: WebDirectoryHandle | null,
+  projectRoot: string
+): Promise<void> {
+  if (!directory) {
+    if (!isTauriRuntime()) {
+      await postServerFileApi("/__i18n/fs/write", { root: projectRoot, path, content });
+      return;
+    }
+    await writeLocaleContent(path, content);
+    return;
+  }
+
+  await ensureDirectoryPermission(directory);
+  const handle = await getBrowserFileHandle(directory, path, true);
+  if (!handle) throw new Error(`无法创建文件：${path}`);
+  const writable = await handle.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+function createLocaleSnapshotFromContent(content: string, format: OutputFormat): LocaleFileSnapshot {
+  return {
+    exists: true,
+    content,
+    locale: parseLocaleContent(content, format),
+    eol: detectEol(content),
+    objectRange: format === "json" || format === "xcstrings" || !content.trim() ? undefined : findLocaleObjectRange(content)
+  };
+}
+
+async function postServerFileApi<T = unknown>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = (await response.json()) as T & { error?: string };
+  if (!response.ok) throw new Error(data.error || `请求失败：${response.status}`);
+  return data;
+}
+
+async function getBrowserFileHandle(
+  directory: WebDirectoryHandle,
+  relativePath: string,
+  create: boolean
+): Promise<FileSystemFileHandle | null> {
+  const parts = normalizeRelativePath(relativePath).split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+
+  let cursor = directory;
+  for (const part of parts.slice(0, -1)) {
+    cursor = await cursor.getDirectoryHandle(part, { create });
+  }
+
+  return cursor.getFileHandle(parts[parts.length - 1], { create });
+}
+
+function normalizeRelativePath(path: string): string {
+  const normalized = path.split("\\").join("/").replace(/^\/+/, "");
+  if (normalized.split("/").some((part) => part === "..")) {
+    throw new Error("输出路径不能包含 ..。");
+  }
+  return normalized;
+}
+
+function downloadTextFile(fileName: string, content: string): void {
+  const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function isMissingBrowserFileError(error: unknown): boolean {
+  return error instanceof DOMException && (error.name === "NotFoundError" || error.name === "NotAllowedError");
+}
+
 function yieldToUi(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
@@ -1164,18 +1403,31 @@ function arrayBufferToBytes(buffer: ArrayBuffer): number[] {
 }
 
 function readExcelWorkbookInfo(source: ExcelSource, sheetName?: string): Promise<ExcelWorkbookInfo> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(readExcelWorkbookInfoFromBuffer(bytesToArrayBuffer(source.bytes ?? []), sheetName));
+  }
   if (source.path) return invoke("read_excel_workbook_info", { path: source.path, sheetName });
   return invoke("read_excel_workbook_info_bytes", { bytes: source.bytes ?? [], sheetName });
 }
 
 function readExcelPreview(source: ExcelSource, options: ExcelReadOptions): Promise<ExcelPreview> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(parseExcelBuffer(bytesToArrayBuffer(source.bytes ?? []), options));
+  }
   if (source.path) return invoke("preview_excel", { path: source.path, options });
   return invoke("preview_excel_bytes", { bytes: source.bytes ?? [], options });
 }
 
 function readExcelRows(source: ExcelSource, options: ExcelReadOptions): Promise<Array<Record<string, string>>> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(rowsFromExcelBuffer(bytesToArrayBuffer(source.bytes ?? []), options));
+  }
   if (source.path) return invoke("rows_from_excel", { path: source.path, options });
   return invoke("rows_from_excel_bytes", { bytes: source.bytes ?? [], options });
+}
+
+function bytesToArrayBuffer(bytes: number[]): ArrayBuffer {
+  return new Uint8Array(bytes).buffer;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

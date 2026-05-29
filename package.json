@@ -12,6 +12,8 @@
     "tauri:portable": "tauri build --no-bundle && node scripts/name-portable-build.mjs",
     "tauri:mac:portable": "node scripts/build-mac-portable.mjs",
     "tauri:mac:bundle": "npm run tauri:mac:portable",
+    "web:build": "npm run build && node scripts/build-web-package.mjs",
+    "web:serve": "node scripts/serve-web.mjs",
     "portable:name": "node scripts/name-portable-build.mjs",
     "test": "vitest run"
   },
