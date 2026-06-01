@@ -1,11 +1,12 @@
 import * as XLSX from "xlsx";
-import type { LanguageColumns } from "./types";
+import type { LanguageColumns, SheetColumnOverrides } from "./types";
 
 export interface ExcelHealthCheckOptions {
   sheetName?: string;
   sheetNames?: string[];
   skipRows?: number;
   headerRow?: number;
+  sheetColumnOverrides?: SheetColumnOverrides;
 }
 
 export interface ExcelHealthCheckRowRef {
@@ -56,10 +57,15 @@ export function inspectExcelBuffer(
       raw: false
     });
     const headers = getHeaders(matrix, headerRow, sheetName);
-    const keyIndex = getColumnIndex(headers, keyColumn, sheetName);
+    const actualKeyColumn = options.sheetColumnOverrides?.[sheetName]?.keyColumn?.trim() || keyColumn;
+    const keyIndex = getColumnIndex(headers, actualKeyColumn, sheetName);
     const languageIndexes = languages.map(([lang, column]) => ({
       lang,
-      index: getColumnIndex(headers, column, sheetName)
+      index: getColumnIndex(
+        headers,
+        options.sheetColumnOverrides?.[sheetName]?.languageColumns?.[lang]?.trim() || column,
+        sheetName
+      )
     }));
 
     matrix.slice(dataStartIndex).forEach((row, offset) => {

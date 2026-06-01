@@ -6,6 +6,11 @@ export type ModuleSplitMode = "none" | "keyPrefix" | "sectionRow";
 export type ModuleNameSource = "keyPrefix" | "sectionRow";
 
 export type LanguageColumns = Record<string, string>;
+export interface SheetColumnOverride {
+  keyColumn?: string;
+  languageColumns?: LanguageColumns;
+}
+export type SheetColumnOverrides = Record<string, SheetColumnOverride>;
 export type LocaleValue = string | LocaleObject;
 export interface LocaleObject {
   [key: string]: LocaleValue;
@@ -25,6 +30,7 @@ export interface ImportSettings {
   projectRoot: string;
   keyColumn: string;
   languageColumns: LanguageColumns;
+  sheetColumnOverrides?: SheetColumnOverrides;
   outputPathTemplate: string;
   outputFormat: OutputFormat;
   mergeStrategy: MergeStrategy;

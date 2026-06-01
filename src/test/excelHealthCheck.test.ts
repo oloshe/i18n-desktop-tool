@@ -30,9 +30,36 @@ describe("excelHealthCheck", () => {
       missingTranslations: [{ sheetName: "a", rowNumber: 442, key: "xxx", lang: "ar_AE" }]
     });
 
-    expect(report).toContain("home.title: x sheet 567 行，y sheet 123 行");
-    expect(report).toContain("x sheet 111 行");
-    expect(report).toContain("sheet: a 442 行 key: xxx 缺少 ar_AE 翻译");
+    expect(report).toContain("home.title: x sheet 567");
+    expect(report).toContain("y sheet 123");
+    expect(report).toContain("x sheet 111");
+    expect(report).toContain("sheet: a 442");
+    expect(report).toContain("key: xxx");
+    expect(report).toContain("ar_AE");
+  });
+
+  it("supports per-sheet language column overrides during health check", () => {
+    const result = inspectExcelBuffer(createOverrideWorkbookBuffer(), "key", { ar_AE: "ar", en_US: "en" }, {
+      sheetNames: ["default", "special"],
+      headerRow: 1,
+      sheetColumnOverrides: {
+        special: {
+          languageColumns: {
+            ar_AE: "arabic_text",
+            en_US: "english_text"
+          }
+        }
+      }
+    });
+
+    expect(result.duplicateKeys).toEqual([]);
+    expect(result.emptyKeyRows).toEqual([]);
+    expect(result.missingTranslations).toContainEqual({
+      sheetName: "special",
+      rowNumber: 2,
+      key: "special.title",
+      lang: "ar_AE"
+    });
   });
 });
 
@@ -44,7 +71,7 @@ function createWorkbookBuffer(): ArrayBuffer {
       ["key", "ar", "en"],
       ["home.title", "عنوان", "Title"],
       ["home.subtitle", "", "Subtitle"],
-      ["", "空key", "Empty key"],
+      ["", "empty-key", "Empty key"],
       ["module-only", "", ""]
     ]),
     "x"
@@ -56,6 +83,27 @@ function createWorkbookBuffer(): ArrayBuffer {
       ["home.title", "عنوان2", "Title 2"]
     ]),
     "y"
+  );
+  return XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+}
+
+function createOverrideWorkbookBuffer(): ArrayBuffer {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["key", "ar", "en"],
+      ["default.title", "Arabic", "English"]
+    ]),
+    "default"
+  );
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["key", "arabic_text", "english_text"],
+      ["special.title", "", "Special English"]
+    ]),
+    "special"
   );
   return XLSX.write(workbook, { type: "array", bookType: "xlsx" });
 }

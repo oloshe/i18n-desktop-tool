@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { ExcelPreview } from "./types";
+import type { ExcelPreview, LanguageColumns, SheetColumnOverrides } from "./types";
 
 const PREVIEW_LIMIT = 20;
 
@@ -8,6 +8,9 @@ export interface ExcelReadOptions {
   sheetNames?: string[];
   skipRows?: number;
   headerRow?: number;
+  keyColumn?: string;
+  languageColumns?: LanguageColumns;
+  sheetColumnOverrides?: SheetColumnOverrides;
 }
 
 export interface ExcelWorkbookInfo {
@@ -137,10 +140,63 @@ export function rowsFromExcelBuffer(buffer: ArrayBuffer, options: ExcelReadOptio
     });
     const headers = getHeaders(matrix, headerRow);
     const dataStartIndex = Math.max(skipRows, headerRow);
+    const columnConfig = resolveSheetColumnConfig(
+      sheetName,
+      options.keyColumn,
+      options.languageColumns,
+      options.sheetColumnOverrides
+    );
 
     return matrix
       .slice(dataStartIndex)
       .filter((row) => hasFilledCell(row, headers))
-      .map((row) => rowToRecord(row, headers));
+      .map((row) => mapRowRecord(row, headers, columnConfig, sheetName));
   });
+}
+
+function resolveSheetColumnConfig(
+  sheetName: string,
+  keyColumn?: string,
+  languageColumns?: LanguageColumns,
+  sheetColumnOverrides?: SheetColumnOverrides
+) {
+  if (!keyColumn || !languageColumns) return null;
+  const override = sheetColumnOverrides?.[sheetName];
+  return {
+    keyColumn,
+    actualKeyColumn: override?.keyColumn?.trim() || keyColumn,
+    languageColumns,
+    actualLanguageColumns: Object.fromEntries(
+      Object.entries(languageColumns).map(([lang, column]) => [lang, override?.languageColumns?.[lang]?.trim() || column])
+    )
+  };
+}
+
+function mapRowRecord(
+  row: unknown[],
+  headers: string[],
+  columnConfig: ReturnType<typeof resolveSheetColumnConfig>,
+  sheetName: string
+): Record<string, string> {
+  const record = rowToRecord(row, headers);
+  if (!columnConfig) return record;
+
+  const { keyColumn, actualKeyColumn, languageColumns, actualLanguageColumns } = columnConfig;
+  if (!(actualKeyColumn in record)) {
+    throw new Error(`Sheet "${sheetName}" 缺少 key 列 "${actualKeyColumn}"。`);
+  }
+
+  const mapped: Record<string, string> = {
+    [keyColumn]: record[actualKeyColumn]
+  };
+
+  Object.entries(languageColumns).forEach(([lang, canonicalColumn]) => {
+    const actualColumn = actualLanguageColumns[lang];
+    if (!(actualColumn in record)) {
+      throw new Error(`Sheet "${sheetName}" 缺少语言列 "${actualColumn}"。`);
+    }
+    mapped[canonicalColumn] = record[actualColumn];
+  });
+
+  return mapped;
 }

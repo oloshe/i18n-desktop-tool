@@ -12,6 +12,16 @@ struct ExcelReadOptions {
   sheet_names: Option<Vec<String>>,
   skip_rows: Option<usize>,
   header_row: Option<usize>,
+  key_column: Option<String>,
+  language_columns: Option<HashMap<String, String>>,
+  sheet_column_overrides: Option<HashMap<String, SheetColumnOverride>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SheetColumnOverride {
+  key_column: Option<String>,
+  language_columns: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,12 +196,19 @@ where
   for sheet_name in active_sheet_names(&sheet_names, options.sheet_name.as_deref(), options.sheet_names.as_deref())? {
     let matrix = sheet_matrix(workbook, &sheet_name)?;
     let headers = get_headers(&matrix, header_row)?;
+    let column_config = resolve_sheet_column_config(
+      &sheet_name,
+      options.key_column.as_deref(),
+      options.language_columns.as_ref(),
+      options.sheet_column_overrides.as_ref(),
+    );
     rows.extend(
       matrix
         .iter()
         .skip(data_start_index)
         .filter(|row| has_filled_cell(row, headers.len()))
-        .map(|row| row_to_record(row, &headers)),
+        .map(|row| map_row_record(row, &headers, column_config.as_ref(), &sheet_name))
+        .collect::<Result<Vec<_>, _>>()?,
     );
   }
 
@@ -230,10 +247,29 @@ where
   for sheet_name in active_sheet_names(&sheet_names, options.sheet_name.as_deref(), options.sheet_names.as_deref())? {
     let matrix = sheet_matrix(workbook, &sheet_name)?;
     let headers = get_headers(&matrix, header_row)?;
-    let key_index = column_index(&headers, key_column, &sheet_name)?;
+    let actual_key_column = options
+      .sheet_column_overrides
+      .as_ref()
+      .and_then(|overrides| overrides.get(&sheet_name))
+      .and_then(|override_config| override_config.key_column.as_deref())
+      .map(|value| value.trim())
+      .filter(|value| !value.is_empty())
+      .unwrap_or(key_column);
+    let key_index = column_index(&headers, actual_key_column, &sheet_name)?;
     let language_indexes: Vec<(&String, usize)> = languages
       .iter()
-      .map(|(lang, column)| column_index(&headers, column, &sheet_name).map(|index| (*lang, index)))
+      .map(|(lang, column)| {
+        let actual_column = options
+          .sheet_column_overrides
+          .as_ref()
+          .and_then(|overrides| overrides.get(&sheet_name))
+          .and_then(|override_config| override_config.language_columns.as_ref())
+          .and_then(|columns| columns.get(*lang))
+          .map(|value| value.trim())
+          .filter(|value| !value.is_empty())
+          .unwrap_or(column);
+        column_index(&headers, actual_column, &sheet_name).map(|index| (*lang, index))
+      })
       .collect::<Result<Vec<_>, _>>()?;
 
     for (offset, row) in matrix.iter().skip(data_start_index).enumerate() {
@@ -360,6 +396,87 @@ fn row_to_record(row: &[String], headers: &[String]) -> HashMap<String, String> 
     .enumerate()
     .map(|(index, header)| (header.to_string(), row.get(index).cloned().unwrap_or_default()))
     .collect()
+}
+
+struct SheetColumnConfig {
+  key_column: String,
+  actual_key_column: String,
+  language_columns: HashMap<String, String>,
+  actual_language_columns: HashMap<String, String>,
+}
+
+fn resolve_sheet_column_config(
+  sheet_name: &str,
+  key_column: Option<&str>,
+  language_columns: Option<&HashMap<String, String>>,
+  sheet_column_overrides: Option<&HashMap<String, SheetColumnOverride>>,
+) -> Option<SheetColumnConfig> {
+  let key_column = key_column?.trim();
+  let language_columns = language_columns?;
+  if key_column.is_empty() {
+    return None;
+  }
+
+  let override_config = sheet_column_overrides.and_then(|overrides| overrides.get(sheet_name));
+  let actual_key_column = override_config
+    .and_then(|item| item.key_column.as_deref())
+    .map(|value| value.trim())
+    .filter(|value| !value.is_empty())
+    .unwrap_or(key_column)
+    .to_string();
+
+  let actual_language_columns = language_columns
+    .iter()
+    .map(|(lang, column)| {
+      let actual = override_config
+        .and_then(|item| item.language_columns.as_ref())
+        .and_then(|columns| columns.get(lang))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(column.as_str())
+        .to_string();
+      (lang.clone(), actual)
+    })
+    .collect();
+
+  Some(SheetColumnConfig {
+    key_column: key_column.to_string(),
+    actual_key_column,
+    language_columns: language_columns.clone(),
+    actual_language_columns,
+  })
+}
+
+fn map_row_record(
+  row: &[String],
+  headers: &[String],
+  column_config: Option<&SheetColumnConfig>,
+  sheet_name: &str,
+) -> Result<HashMap<String, String>, String> {
+  let record = row_to_record(row, headers);
+  let Some(column_config) = column_config else {
+    return Ok(record);
+  };
+
+  let key_value = record
+    .get(&column_config.actual_key_column)
+    .cloned()
+    .ok_or_else(|| format!("Sheet \"{}\" is missing column \"{}\".", sheet_name, column_config.actual_key_column))?;
+  let mut mapped = HashMap::from([(column_config.key_column.clone(), key_value)]);
+
+  for (lang, canonical_column) in &column_config.language_columns {
+    let actual_column = column_config
+      .actual_language_columns
+      .get(lang)
+      .ok_or_else(|| format!("Sheet \"{}\" is missing column mapping for language \"{}\".", sheet_name, lang))?;
+    let value = record
+      .get(actual_column)
+      .cloned()
+      .ok_or_else(|| format!("Sheet \"{}\" is missing column \"{}\".", sheet_name, actual_column))?;
+    mapped.insert(canonical_column.clone(), value);
+  }
+
+  Ok(mapped)
 }
 
 fn column_index(headers: &[String], column: &str, sheet_name: &str) -> Result<usize, String> {

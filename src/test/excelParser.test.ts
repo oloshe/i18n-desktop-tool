@@ -33,6 +33,29 @@ describe("excelParser", () => {
 
     expect(rows.map((row) => row.key)).toEqual(["other-hello", "hello", "module-only"]);
   });
+
+  it("supports default language mapping with per-sheet overrides", () => {
+    const rows = rowsFromExcelBuffer(createMismatchedWorkbookBuffer(), {
+      sheetNames: ["Default", "Special"],
+      skipRows: 1,
+      headerRow: 1,
+      keyColumn: "key",
+      languageColumns: { "zh-CN": "cn", "en-US": "en" },
+      sheetColumnOverrides: {
+        Special: {
+          languageColumns: {
+            "zh-CN": "zh_CN_text",
+            "en-US": "en_US_text"
+          }
+        }
+      }
+    });
+
+    expect(rows).toEqual([
+      { key: "home.title", cn: "榛樿涓枃", en: "Default English" },
+      { key: "settings.title", cn: "鐗规畩涓枃", en: "Special English" }
+    ]);
+  });
 });
 
 function createWorkbookBuffer(): ArrayBuffer {
@@ -52,6 +75,27 @@ function createWorkbookBuffer(): ArrayBuffer {
       ["", "", ""]
     ]),
     "Data"
+  );
+  return XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+}
+
+function createMismatchedWorkbookBuffer(): ArrayBuffer {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["key", "cn", "en"],
+      ["home.title", "榛樿涓枃", "Default English"]
+    ]),
+    "Default"
+  );
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["key", "zh_CN_text", "en_US_text"],
+      ["settings.title", "鐗规畩涓枃", "Special English"]
+    ]),
+    "Special"
   );
   return XLSX.write(workbook, { type: "array", bookType: "xlsx" });
 }

@@ -56,7 +56,8 @@ import type {
   ModuleNameSource,
   ModuleSplitMode,
   OutputFormat,
-  SavedProjectConfig
+  SavedProjectConfig,
+  SheetColumnOverrides
 } from "./core/types";
 import {
   parseExcelBuffer,
@@ -78,12 +79,13 @@ const DEFAULT_LANGUAGE_COLUMNS: LanguageColumns = {
 
 const theme = createTheme({
   palette: {
-    primary: { main: "#006a6a" },
-    secondary: { main: "#6750a4" },
-    background: { default: "#f7f8fb", paper: "#ffffff" }
+    mode: "dark",
+    primary: { main: "#2dd4bf" },
+    secondary: { main: "#38bdf8" },
+    background: { default: "#0b1220", paper: "#0f172a" }
   },
   shape: {
-    borderRadius: 8
+    borderRadius: 12
   }
 });
 
@@ -109,6 +111,7 @@ function App() {
   const [projectRoot, setProjectRoot] = useState("");
   const [keyColumn, setKeyColumn] = useState("key");
   const [languageColumns, setLanguageColumns] = useState<LanguageColumns>(DEFAULT_LANGUAGE_COLUMNS);
+  const [sheetColumnOverrides, setSheetColumnOverrides] = useState<SheetColumnOverrides>({});
   const [outputPathTemplate, setOutputPathTemplate] = useState("locales/{lang}/{module}.json");
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("json");
   const [mergeStrategy, setMergeStrategy] = useState<MergeStrategy>("overwrite");
@@ -193,6 +196,9 @@ function App() {
           const kept = current.filter((name) => nextPreview.sheetNames.includes(name));
           return kept.length > 0 ? kept : [nextPreview.activeSheetName];
         });
+        setSheetColumnOverrides((current) =>
+          Object.fromEntries(Object.entries(current).filter(([name]) => nextPreview.sheetNames.includes(name)))
+        );
         if (nextPreview.headers.includes("key")) setKeyColumn("key");
         setPlans([]);
       } catch (error) {
@@ -209,6 +215,7 @@ function App() {
       projectRoot,
       keyColumn,
       languageColumns,
+      sheetColumnOverrides,
       outputPathTemplate,
       outputFormat,
       mergeStrategy,
@@ -234,6 +241,7 @@ function App() {
       excelPath,
       keyColumn,
       languageColumns,
+      sheetColumnOverrides,
       outputPathTemplate,
       outputFormat,
       mergeStrategy,
@@ -412,6 +420,51 @@ function App() {
     setLanguageColumns(Object.fromEntries(entries));
   }
 
+  function addSheetOverride() {
+    const nextSheetName = selectedSheetNames.find((name) => !(name in sheetColumnOverrides))
+      ?? preview?.sheetNames.find((name) => !(name in sheetColumnOverrides));
+    if (!nextSheetName) return;
+    setSheetColumnOverrides((current) => ({ ...current, [nextSheetName]: { languageColumns: {} } }));
+  }
+
+  function renameSheetOverride(sheetNameToReplace: string, nextSheetName: string) {
+    if (!nextSheetName || nextSheetName === sheetNameToReplace) return;
+    setSheetColumnOverrides((current) => {
+      const next = { ...current };
+      const override = next[sheetNameToReplace];
+      delete next[sheetNameToReplace];
+      next[nextSheetName] = override;
+      return next;
+    });
+  }
+
+  function updateSheetOverride(sheetNameToUpdate: string, field: "keyColumn", value: string) {
+    setSheetColumnOverrides((current) => ({
+      ...current,
+      [sheetNameToUpdate]: {
+        ...current[sheetNameToUpdate],
+        [field]: value
+      }
+    }));
+  }
+
+  function updateSheetOverrideLanguage(sheetNameToUpdate: string, lang: string, value: string) {
+    setSheetColumnOverrides((current) => ({
+      ...current,
+      [sheetNameToUpdate]: {
+        ...current[sheetNameToUpdate],
+        languageColumns: {
+          ...(current[sheetNameToUpdate]?.languageColumns ?? {}),
+          [lang]: value
+        }
+      }
+    }));
+  }
+
+  function removeSheetOverride(sheetNameToRemove: string) {
+    setSheetColumnOverrides((current) => Object.fromEntries(Object.entries(current).filter(([name]) => name !== sheetNameToRemove)));
+  }
+
   function applyConfig(config: SavedProjectConfig) {
     setProjectName(config.projectName);
     setExcelPath(config.excelUrl ?? "");
@@ -420,6 +473,7 @@ function App() {
     setProjectRoot(config.projectRoot);
     setKeyColumn(config.keyColumn);
     setLanguageColumns(config.languageColumns);
+    setSheetColumnOverrides(config.sheetColumnOverrides ?? {});
     setOutputPathTemplate(config.outputPathTemplate);
     setOutputFormat(config.outputFormat);
     setMergeStrategy(config.mergeStrategy);
@@ -574,7 +628,15 @@ function App() {
     setStatus("previewing");
     setMessage("");
     try {
-      const rows = await readExcelRows(excelSource, { sheetName, sheetNames: selectedSheetNames, skipRows, headerRow });
+      const rows = await readExcelRows(excelSource, {
+        sheetName,
+        sheetNames: selectedSheetNames,
+        skipRows,
+        headerRow,
+        keyColumn,
+        languageColumns,
+        sheetColumnOverrides
+      });
       if (isXcstringsOutput) {
         const sourceLanguage = getSourceLanguage(languageColumns);
         const locale = generateXcstringsLocale(rows, keyColumn, languageColumns);
@@ -709,7 +771,8 @@ function App() {
         sheetName,
         sheetNames: selectedSheetNames,
         skipRows,
-        headerRow
+        headerRow,
+        sheetColumnOverrides
       });
       setHealthCheckResult(result);
       setMessage("Excel 体检完成。");
@@ -957,6 +1020,72 @@ function App() {
                   </div>
                 ))}
               </div>
+            </Paper>
+
+            <Paper className="panel overridePanel" variant="outlined">
+              <div className="panelHead">
+                <div>
+                  <Typography component="h2" variant="h6">Sheet 列覆盖</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    默认使用通用映射，只有个别 sheet 列名不一致时才在这里覆盖。
+                  </Typography>
+                </div>
+                <Button onClick={addSheetOverride} disabled={!preview || preview.sheetNames.length === 0} variant="outlined">
+                  添加覆盖
+                </Button>
+              </div>
+              {Object.entries(sheetColumnOverrides).length > 0 ? (
+                <div className="overrideRows">
+                  {Object.entries(sheetColumnOverrides).map(([overrideSheetName, override]) => (
+                    <div className="overrideCard" key={overrideSheetName}>
+                      <Stack className="split" direction="row" spacing={1}>
+                        <TextField
+                          label="Sheet"
+                          value={overrideSheetName}
+                          onChange={(event) => renameSheetOverride(overrideSheetName, event.target.value)}
+                          select
+                          size="small"
+                          fullWidth
+                        >
+                          {(preview?.sheetNames ?? [overrideSheetName]).map((name) => (
+                            <MenuItem key={name} value={name}>{name}</MenuItem>
+                          ))}
+                        </TextField>
+                        <Button onClick={() => removeSheetOverride(overrideSheetName)} color="error" variant="text">
+                          删除
+                        </Button>
+                      </Stack>
+                      <TextField
+                        label="key 列覆盖"
+                        value={override.keyColumn ?? ""}
+                        onChange={(event) => updateSheetOverride(overrideSheetName, "keyColumn", event.target.value)}
+                        placeholder={`留空则沿用 ${keyColumn}`}
+                        size="small"
+                        fullWidth
+                      />
+                      <div className="overrideLanguageRows">
+                        {Object.entries(languageColumns).map(([lang, column]) => (
+                          <div className="languageRow compactLanguageRow" key={`${overrideSheetName}-${lang}`}>
+                            <TextField label="语言" value={lang} size="small" slotProps={{ input: { readOnly: true } }} />
+                            <span>{"->"}</span>
+                            <TextField
+                              label="Sheet 列"
+                              value={override.languageColumns?.[lang] ?? ""}
+                              onChange={(event) => updateSheetOverrideLanguage(overrideSheetName, lang, event.target.value)}
+                              placeholder={`留空则沿用 ${column}`}
+                              size="small"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Typography className="empty" color="text.secondary">
+                  多个 sheet 表头一致时不需要配置，只有特殊 sheet 才补一层覆盖即可。
+                </Typography>
+              )}
             </Paper>
           </div>
 
