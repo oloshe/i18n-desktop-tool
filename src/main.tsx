@@ -90,7 +90,16 @@ const theme = createTheme({
 });
 
 type StatusKind = "idle" | "reading" | "previewing" | "checking" | "importing";
-type DiffLine = { kind: "same" | "added" | "removed"; prefix: string; text: string };
+type DiffRow =
+  | { kind: "hunk"; header: string }
+  | {
+      kind: "row";
+      rowKind: "equal" | "replace" | "delete" | "insert";
+      oldLineNumber: number | null;
+      newLineNumber: number | null;
+      oldText: string;
+      newText: string;
+    };
 type ExcelSource = { label: string; path?: string; bytes?: number[] };
 type WebDirectoryHandle = FileSystemDirectoryHandle;
 interface ImportSummary {
@@ -268,7 +277,7 @@ function App() {
     () =>
       plans.map((plan) => ({
         plan,
-        diff: plan.error ? [] : createTextDiff(plan.existingContent, plan.nextContent)
+        diff: plan.error ? [] : createGitStyleDiff(plan.existingContent, plan.nextContent)
       })),
     [plans]
   );
@@ -1257,14 +1266,25 @@ function App() {
                     {plan.error ? (
                       <p className="danger">{plan.error}</p>
                     ) : diff.length > 0 ? (
-                      <pre>
-                        {diff.map((line, index) => (
-                          <div className={line.kind} key={`${index}-${line.text}`}>
-                            <span>{line.prefix}</span>
-                            <code>{line.text || " "}</code>
-                          </div>
-                        ))}
-                      </pre>
+                      <div className="diffBody">
+                        {diff.map((row, index) =>
+                          row.kind === "hunk" ? (
+                            <div className="diffHunkHeader" key={`${index}-${row.header}`}>
+                              {row.header}
+                            </div>
+                          ) : (
+                            <div
+                              className={`diffRow ${row.rowKind}`}
+                              key={`${index}-${row.oldLineNumber ?? "n"}-${row.newLineNumber ?? "n"}-${row.oldText}-${row.newText}`}
+                            >
+                              <span className="diffLineNo diffOldNo">{formatDiffLineNumber(row.oldLineNumber)}</span>
+                              <code className="diffCell diffOldCell">{row.oldText || " "}</code>
+                              <span className="diffLineNo diffNewNo">{formatDiffLineNumber(row.newLineNumber)}</span>
+                              <code className="diffCell diffNewCell">{row.newText || " "}</code>
+                            </div>
+                          )
+                        )}
+                      </div>
                     ) : (
                       <Typography className="empty" color="text.secondary">没有内容变化。</Typography>
                     )}
@@ -1463,27 +1483,251 @@ function isLocaleObject(value: unknown): value is LocaleObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function createTextDiff(before: string, after: string): DiffLine[] {
-  if (!before && after) {
-    return after.split(/\r?\n/).map((text) => ({ kind: "added", prefix: "+", text }));
-  }
-  const beforeLines = before.split(/\r?\n/);
-  const afterLines = after.split(/\r?\n/);
-  const maxLength = Math.max(beforeLines.length, afterLines.length);
-  const diff: DiffLine[] = [];
+type DiffEdit =
+  | { kind: "equal"; text: string; oldLineNumber: number; newLineNumber: number }
+  | { kind: "delete"; text: string; oldLineNumber: number; newLineNumber: null }
+  | { kind: "insert"; text: string; oldLineNumber: null; newLineNumber: number };
 
-  for (let index = 0; index < maxLength; index += 1) {
-    const oldLine = beforeLines[index];
-    const nextLine = afterLines[index];
-    if (oldLine === nextLine) {
-      diff.push({ kind: "same", prefix: " ", text: oldLine ?? "" });
+function createGitStyleDiff(before: string, after: string): DiffRow[] {
+  if (before === after) return [];
+
+  const beforeLines = splitLines(before);
+  const afterLines = splitLines(after);
+  const edits = buildLineEdits(beforeLines, afterLines);
+  const rows = buildDiffRows(edits);
+  return buildDiffHunks(rows);
+}
+
+function splitLines(text: string): string[] {
+  return text.length === 0 ? [] : text.split(/\r?\n/);
+}
+
+function buildLineEdits(beforeLines: string[], afterLines: string[]): DiffEdit[] {
+  const n = beforeLines.length;
+  const m = afterLines.length;
+  const max = n + m;
+  const trace: Map<number, number>[] = [];
+  let v = new Map<number, number>([[1, 0]]);
+
+  for (let d = 0; d <= max; d += 1) {
+    trace.push(new Map(v));
+    for (let k = -d; k <= d; k += 2) {
+      const left = v.get(k - 1) ?? Number.NEGATIVE_INFINITY;
+      const right = v.get(k + 1) ?? Number.NEGATIVE_INFINITY;
+      let x: number;
+      if (k === -d || (k !== d && left < right)) {
+        x = right;
+      } else {
+        x = left + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && beforeLines[x] === afterLines[y]) {
+        x += 1;
+        y += 1;
+      }
+      v.set(k, x);
+      if (x >= n && y >= m) {
+        return backtrackLineEdits(trace, beforeLines, afterLines);
+      }
+    }
+  }
+
+  return [];
+}
+
+function backtrackLineEdits(trace: Map<number, number>[], beforeLines: string[], afterLines: string[]): DiffEdit[] {
+  let x = beforeLines.length;
+  let y = afterLines.length;
+  const edits: DiffEdit[] = [];
+
+  for (let d = trace.length - 1; d > 0; d -= 1) {
+    const v = trace[d - 1];
+    const k = x - y;
+    const left = v.get(k - 1) ?? Number.NEGATIVE_INFINITY;
+    const right = v.get(k + 1) ?? Number.NEGATIVE_INFINITY;
+    const prevK = k === -d || (k !== d && left < right) ? k + 1 : k - 1;
+    const prevX = v.get(prevK) ?? 0;
+    const prevY = prevX - prevK;
+
+    while (x > prevX && y > prevY) {
+      edits.push({
+        kind: "equal",
+        text: beforeLines[x - 1] ?? "",
+        oldLineNumber: x,
+        newLineNumber: y
+      });
+      x -= 1;
+      y -= 1;
+    }
+
+    if (x === prevX) {
+      edits.push({
+        kind: "insert",
+        text: afterLines[prevY] ?? "",
+        oldLineNumber: null,
+        newLineNumber: prevY + 1
+      });
+    } else {
+      edits.push({
+        kind: "delete",
+        text: beforeLines[prevX] ?? "",
+        oldLineNumber: prevX + 1,
+        newLineNumber: null
+      });
+    }
+
+    x = prevX;
+    y = prevY;
+  }
+
+  while (x > 0 && y > 0) {
+    edits.push({
+      kind: "equal",
+      text: beforeLines[x - 1] ?? "",
+      oldLineNumber: x,
+      newLineNumber: y
+    });
+    x -= 1;
+    y -= 1;
+  }
+
+  while (x > 0) {
+    edits.push({
+      kind: "delete",
+      text: beforeLines[x - 1] ?? "",
+      oldLineNumber: x,
+      newLineNumber: null
+    });
+    x -= 1;
+  }
+
+  while (y > 0) {
+    edits.push({
+      kind: "insert",
+      text: afterLines[y - 1] ?? "",
+      oldLineNumber: null,
+      newLineNumber: y
+    });
+    y -= 1;
+  }
+
+  return edits.reverse();
+}
+
+function buildDiffRows(edits: DiffEdit[]): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let index = 0;
+
+  while (index < edits.length) {
+    const edit = edits[index];
+    if (edit.kind === "equal") {
+      rows.push({
+        kind: "row",
+        rowKind: "equal",
+        oldLineNumber: edit.oldLineNumber,
+        newLineNumber: edit.newLineNumber,
+        oldText: edit.text,
+        newText: edit.text
+      });
+      index += 1;
       continue;
     }
-    if (oldLine !== undefined) diff.push({ kind: "removed", prefix: "-", text: oldLine });
-    if (nextLine !== undefined) diff.push({ kind: "added", prefix: "+", text: nextLine });
+
+    const block: DiffEdit[] = [];
+    while (index < edits.length && edits[index].kind !== "equal") {
+      block.push(edits[index]);
+      index += 1;
+    }
+
+    const deletes = block.filter((item): item is Extract<DiffEdit, { kind: "delete" }> => item.kind === "delete");
+    const inserts = block.filter((item): item is Extract<DiffEdit, { kind: "insert" }> => item.kind === "insert");
+    const pairCount = Math.max(deletes.length, inserts.length);
+
+    for (let pairIndex = 0; pairIndex < pairCount; pairIndex += 1) {
+      const removed = deletes[pairIndex];
+      const added = inserts[pairIndex];
+      if (removed && added) {
+        rows.push({
+          kind: "row",
+          rowKind: "replace",
+          oldLineNumber: removed.oldLineNumber,
+          newLineNumber: added.newLineNumber,
+          oldText: removed.text,
+          newText: added.text
+        });
+        continue;
+      }
+      if (removed) {
+        rows.push({
+          kind: "row",
+          rowKind: "delete",
+          oldLineNumber: removed.oldLineNumber,
+          newLineNumber: null,
+          oldText: removed.text,
+          newText: ""
+        });
+        continue;
+      }
+      if (added) {
+        rows.push({
+          kind: "row",
+          rowKind: "insert",
+          oldLineNumber: null,
+          newLineNumber: added.newLineNumber,
+          oldText: "",
+          newText: added.text
+        });
+      }
+    }
   }
 
-  return diff;
+  return rows;
+}
+
+function buildDiffHunks(rows: DiffRow[], contextLines = 3): DiffRow[] {
+  const changeIndices = rows
+    .map((row, index) => (row.kind === "row" && row.rowKind !== "equal" ? index : null))
+    .filter((value): value is number => value !== null);
+
+  if (changeIndices.length === 0) return [];
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const index of changeIndices) {
+    const nextRange = { start: Math.max(0, index - contextLines), end: Math.min(rows.length - 1, index + contextLines) };
+    const lastRange = ranges[ranges.length - 1];
+    if (lastRange && nextRange.start <= lastRange.end + 1) {
+      lastRange.end = Math.max(lastRange.end, nextRange.end);
+    } else {
+      ranges.push(nextRange);
+    }
+  }
+
+  const hunks: DiffRow[] = [];
+  for (const range of ranges) {
+    const hunkRows = rows.slice(range.start, range.end + 1);
+    hunks.push({ kind: "hunk", header: formatDiffHeader(hunkRows) });
+    hunks.push(...hunkRows);
+  }
+
+  return hunks;
+}
+
+function formatDiffHeader(rows: DiffRow[]): string {
+  const oldLineNumbers = rows.flatMap((row) => (row.kind === "row" && row.oldLineNumber !== null ? [row.oldLineNumber] : []));
+  const newLineNumbers = rows.flatMap((row) => (row.kind === "row" && row.newLineNumber !== null ? [row.newLineNumber] : []));
+  const oldStart = oldLineNumbers[0] ?? 0;
+  const newStart = newLineNumbers[0] ?? 0;
+  const oldCount = oldLineNumbers.length;
+  const newCount = newLineNumbers.length;
+  return `@@ -${formatDiffRange(oldStart, oldCount)} +${formatDiffRange(newStart, newCount)} @@`;
+}
+
+function formatDiffRange(start: number, count: number): string {
+  return count <= 1 ? `${start}` : `${start},${count}`;
+}
+
+function formatDiffLineNumber(value: number | null): string {
+  return value === null ? "" : String(value);
 }
 
 function getFileName(path: string): string {

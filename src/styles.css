@@ -272,7 +272,7 @@ th {
 
 .previewPanel {
   align-content: start;
-  min-height: 0;
+  min-height: 580px;
 }
 
 .previewEmpty {
@@ -287,11 +287,13 @@ th {
 
 .previewSplit {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(290px, 360px) minmax(0, 1fr);
   gap: 14px;
+  min-height: 460px;
 }
 
 .scrollList {
+  max-height: 580px;
   overflow: auto;
   padding-right: 4px;
 }
@@ -346,6 +348,7 @@ th {
 .diffPanel {
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 14px;
+  max-height: 580px;
   overflow: auto;
   background: #08111f;
   color: #dbeafe;
@@ -382,34 +385,74 @@ th {
   overflow-wrap: anywhere;
 }
 
-.diffPanel pre {
-  margin: 0;
-  padding: 8px 0 12px;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.diffPanel pre div {
+.diffBody {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 8px;
-  padding: 0 12px;
+  gap: 1px;
+  padding-bottom: 12px;
+  background: #1e293b;
 }
 
-.diffPanel code {
-  color: inherit;
+.diffHunkHeader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.92));
+  color: #86efac;
+  font-size: 12px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+}
+
+.diffRow {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 56px minmax(0, 1fr);
+  gap: 1px;
+  align-items: stretch;
+  background: #1e293b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diffLineNo,
+.diffCell {
+  display: block;
+  padding: 8px 10px;
+  min-width: 0;
+  font-family: Consolas, "SFMono-Regular", monospace;
   white-space: pre-wrap;
-  overflow: visible;
+  word-break: break-word;
 }
 
-.diffPanel .added {
-  background: rgba(22, 101, 52, 0.35);
+.diffLineNo {
+  text-align: right;
+  color: #64748b;
+  background: #0b1220;
+}
+
+.diffCell {
+  color: #dbeafe;
+  background: rgba(8, 15, 29, 0.96);
+}
+
+.diffRow.equal .diffCell {
+  background: rgba(8, 15, 29, 0.96);
+}
+
+.diffRow.delete .diffOldCell,
+.diffRow.replace .diffOldCell {
+  background: rgba(127, 29, 29, 0.38);
+  color: #fecaca;
+}
+
+.diffRow.insert .diffNewCell,
+.diffRow.replace .diffNewCell {
+  background: rgba(22, 101, 52, 0.38);
   color: #bbf7d0;
 }
 
-.diffPanel .removed {
-  background: rgba(127, 29, 29, 0.36);
-  color: #fecaca;
+.diffRow.delete .diffNewCell,
+.diffRow.insert .diffOldCell {
+  color: #64748b;
 }
 
 code {
@@ -448,6 +491,7 @@ code {
 .summaryList {
   display: grid;
   gap: 10px;
+  max-height: 320px;
   overflow: auto;
 }
 
@@ -476,6 +520,12 @@ code {
     position: static;
     max-height: none;
     overflow: visible;
+  }
+}
+
+@media (min-width: 1600px) {
+  .languageRows {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
