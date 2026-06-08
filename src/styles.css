@@ -432,6 +432,8 @@ th {
 .diffCell {
   color: #dbeafe;
   background: rgba(8, 15, 29, 0.96);
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .diffRow.equal .diffCell {
@@ -509,6 +511,17 @@ code {
 
 .summaryRow span {
   white-space: nowrap;
+}
+
+.exportMeta {
+  color: #dbeafe;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.exportPreviewTable {
+  max-height: min(68vh, 720px);
 }
 
 @media (max-width: 1180px) {

@@ -10,6 +10,10 @@
     "dialog:allow-save",
     "fs:default",
     {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "**" }]
+    },
+    {
       "identifier": "fs:allow-exists",
       "allow": [{ "path": "**" }]
     },

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
+import * as XLSX from "xlsx";
 import {
   Alert,
   Box,
@@ -24,7 +25,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { readDir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import "./styles.css";
 import {
   deleteProjectConfig,
@@ -89,7 +90,7 @@ const theme = createTheme({
   }
 });
 
-type StatusKind = "idle" | "reading" | "previewing" | "checking" | "importing";
+type StatusKind = "idle" | "reading" | "previewing" | "checking" | "importing" | "exporting";
 type DiffRow =
   | { kind: "hunk"; header: string }
   | {
@@ -105,6 +106,17 @@ type WebDirectoryHandle = FileSystemDirectoryHandle;
 interface ImportSummary {
   changedFiles: number;
   lines: Array<{ lang: string; moduleName: string; added: number; modified: number; deleted: number }>;
+}
+interface LocaleExportModule {
+  displayName: string;
+  pathName: string;
+}
+interface LocaleExportPreview {
+  headers: string[];
+  rows: Array<Record<string, string>>;
+  modules: string[];
+  fileCount: number;
+  missingFiles: string[];
 }
 
 function App() {
@@ -129,6 +141,7 @@ function App() {
   const [moduleNameSource, setModuleNameSource] = useState<ModuleNameSource>("keyPrefix");
   const [keyStyle, setKeyStyle] = useState<KeyStyle>("nested");
   const [moduleFilter, setModuleFilter] = useState("");
+  const [exportModuleFilter, setExportModuleFilter] = useState("");
   const [ignoredModuleFilter, setIgnoredModuleFilter] = useState("");
   const [moduleNameReplacements, setModuleNameReplacements] = useState("");
   const [removeModulePrefix, setRemoveModulePrefix] = useState(false);
@@ -143,6 +156,7 @@ function App() {
   const [status, setStatus] = useState<StatusKind>("idle");
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [healthCheckResult, setHealthCheckResult] = useState<ExcelHealthCheckResult | null>(null);
+  const [localeExportPreview, setLocaleExportPreview] = useState<LocaleExportPreview | null>(null);
   const previewRequestRef = useRef(0);
   const diffScrollerRef = useRef<HTMLDivElement | null>(null);
   const splitByModule = moduleSplitMode === "keyPrefix";
@@ -792,6 +806,162 @@ function App() {
     }
   }
 
+  async function previewLocaleExport() {
+    if (!webProjectDirectory && isTauriRuntime() && !projectRoot) {
+      setMessage("请先选择项目目录。");
+      return;
+    }
+    if (outputFormat !== "xcstrings" && !outputPathTemplate.includes("{lang}")) {
+      setMessage('导出路径模板必须包含 "{lang}"。');
+      return;
+    }
+
+    setStatus("exporting");
+    setMessage("");
+    await yieldToUi();
+    try {
+      const nextPreview = await buildLocaleExportPreview();
+      setLocaleExportPreview(nextPreview);
+      setMessage(`导出预览已生成：${nextPreview.rows.length} 行，${nextPreview.fileCount} 个文件。`);
+    } catch (error) {
+      showError("生成导出预览失败", error);
+    } finally {
+      setStatus("idle");
+    }
+  }
+
+  async function buildLocaleExportPreview(): Promise<LocaleExportPreview> {
+    const languages = Object.entries(languageColumns).filter(([lang, column]) => lang.trim() && column.trim());
+    if (languages.length === 0) throw new Error("请至少配置一个语言列映射。");
+    if (!keyColumn.trim()) throw new Error("请配置 key 列。");
+
+    if (outputFormat === "xcstrings") {
+      const path = await resolveOutputFilePath(projectRoot, getXcstringsOutputPath(outputPathTemplate), webProjectDirectory);
+      const snapshot = await readOutputLocaleSnapshot(path, outputFormat, webProjectDirectory, projectRoot);
+      const rows = buildXcstringsExportRows(snapshot.locale, keyColumn, languageColumns, parseModuleFilter(exportModuleFilter));
+      return {
+        headers: getLocaleExportHeaders(keyColumn, languageColumns),
+        rows,
+        modules: parseModuleFilter(exportModuleFilter),
+        fileCount: snapshot.exists ? 1 : 0,
+        missingFiles: snapshot.exists ? [] : [path]
+      };
+    }
+
+    const templateSplitsFiles = outputPathTemplate.includes("{module}");
+    const modules = await resolveLocaleExportModules(templateSplitsFiles);
+    const localeByLanguage: Record<string, Record<string, LocaleObject>> = {};
+    const missingFiles: string[] = [];
+    let fileCount = 0;
+
+    for (const [lang] of languages) {
+      localeByLanguage[lang] = {};
+      const languageModules = templateSplitsFiles ? modules : [{ displayName: "", pathName: "" }];
+      for (const moduleName of languageModules) {
+        await yieldToUi();
+        const relativePath = resolveLocalePath(outputPathTemplate, lang, templateSplitsFiles ? moduleName.pathName : undefined);
+        const path = await resolveOutputFilePath(projectRoot, relativePath, webProjectDirectory);
+        const snapshot = await readOutputLocaleSnapshot(path, outputFormat, webProjectDirectory, projectRoot);
+        if (!snapshot.exists) {
+          missingFiles.push(path);
+          continue;
+        }
+        fileCount += 1;
+        localeByLanguage[lang][moduleName.displayName] = snapshot.locale;
+      }
+    }
+
+    const rows = buildLocaleExportRows(localeByLanguage, keyColumn, languageColumns, {
+      templateSplitsFiles,
+      moduleFilter: parseModuleFilter(exportModuleFilter),
+      removeModulePrefix
+    });
+
+    return {
+      headers: getLocaleExportHeaders(keyColumn, languageColumns),
+      rows,
+      modules: templateSplitsFiles ? modules.map((moduleName) => moduleName.displayName) : parseModuleFilter(exportModuleFilter),
+      fileCount,
+      missingFiles
+    };
+  }
+
+  function downloadLocaleExportCsv() {
+    if (!localeExportPreview) return;
+    const sheet = XLSX.utils.json_to_sheet(localeExportPreview.rows, { header: localeExportPreview.headers });
+    const csv = XLSX.utils.sheet_to_csv(sheet);
+    downloadBlobFile(`${getSafeDownloadName(projectName)}.csv`, new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" }));
+  }
+
+  function downloadLocaleExportXlsx() {
+    if (!localeExportPreview) return;
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet(localeExportPreview.rows, { header: localeExportPreview.headers });
+    XLSX.utils.book_append_sheet(workbook, sheet, "i18n");
+    const bytes = XLSX.write(workbook, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+    downloadBlobFile(
+      `${getSafeDownloadName(projectName)}.xlsx`,
+      new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+    );
+  }
+
+  async function resolveLocaleExportModules(templateSplitsFiles: boolean): Promise<LocaleExportModule[]> {
+    const replacements = parseModuleNameReplacements(moduleNameReplacements);
+    const explicitModules = parseModuleFilter(exportModuleFilter);
+    if (explicitModules.length > 0) {
+      return explicitModules.map((moduleName) => ({
+        displayName: moduleName,
+        pathName: replacements[moduleName] || moduleName
+      }));
+    }
+    if (!templateSplitsFiles) return [];
+
+    const firstLanguage = Object.keys(languageColumns).find((lang) => lang.trim());
+    if (!firstLanguage) throw new Error("请至少配置一个语言列映射。");
+
+    const marker = "__MODULE__";
+    const markerPath = resolveLocalePath(outputPathTemplate, firstLanguage, marker);
+    const parts = normalizeRelativePath(markerPath).split("/");
+    const markerPartIndex = parts.findIndex((part) => part.includes(marker));
+    if (markerPartIndex === -1 || parts.slice(0, markerPartIndex).some((part) => part.includes(marker))) {
+      throw new Error('当前路径模板无法自动发现模块，请在"只导出模块"中填写模块名。');
+    }
+
+    const [prefix, suffix] = parts[markerPartIndex].split(marker);
+    const directory = parts.slice(0, markerPartIndex).join("/");
+    const names = await listProjectDirectoryEntryNames(directory);
+    const discovered = names
+      .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
+      .map((name) => name.slice(prefix.length, name.length - suffix.length))
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right));
+
+    if (discovered.length === 0) {
+      throw new Error('没有在路径模板对应目录发现模块文件，请在"只导出模块"中填写模块名。');
+    }
+
+    return discovered.map((moduleName) => ({ displayName: moduleName, pathName: moduleName }));
+  }
+
+  async function listProjectDirectoryEntryNames(relativePath: string): Promise<string[]> {
+    const normalized = normalizeRelativePath(relativePath);
+    if (webProjectDirectory) {
+      const directory = await getBrowserDirectoryHandle(webProjectDirectory, normalized);
+      const entries = (directory as unknown as { entries?: () => AsyncIterable<[string, FileSystemHandle]> }).entries?.();
+      if (!entries) return [];
+      const names: string[] = [];
+      for await (const [name, handle] of entries) {
+        if (handle.kind === "file") names.push(name);
+      }
+      return names;
+    }
+
+    if (!isTauriRuntime()) return [];
+    const path = normalized ? await resolveProjectFile(projectRoot, normalized) : projectRoot;
+    const entries = await readDir(path);
+    return entries.filter((entry) => !("children" in entry) || !entry.children).map((entry) => entry.name).filter(Boolean);
+  }
+
   async function runImport() {
     if (plans.length === 0) {
       setMessage("请先生成写入预览。");
@@ -908,6 +1078,7 @@ function App() {
         </div>
         <Stack className="actions" direction="row" spacing={1}>
           <Button onClick={runExcelHealthCheck} disabled={isWorking} variant="outlined">Excel体检</Button>
+          <Button onClick={previewLocaleExport} disabled={isWorking} variant="outlined">导出预览</Button>
           <Button onClick={buildPreviewPlans} disabled={isWorking} variant="outlined">生成预览</Button>
           <Button onClick={runImport} disabled={isWorking} variant="contained">执行导入</Button>
         </Stack>
@@ -1148,6 +1319,13 @@ function App() {
                     </TextField>
                   </Stack>
                   <TextField label="只导入模块" value={moduleFilter} onChange={(event) => setModuleFilter(event.target.value)} placeholder="例如：base, agency；留空则全部导入" size="small" />
+                  <TextField
+                    label="只导出模块"
+                    value={exportModuleFilter}
+                    onChange={(event) => setExportModuleFilter(event.target.value)}
+                    placeholder="例如：base, agency；留空则按路径自动发现"
+                    size="small"
+                  />
                   <TextField label="忽略模块" value={ignoredModuleFilter} onChange={(event) => setIgnoredModuleFilter(event.target.value)} placeholder="例如：debug, deprecated" size="small" />
                   <TextField
                     label="模块名替换"
@@ -1304,6 +1482,14 @@ function App() {
       <OperationDialog status={status} />
       {summary && <ImportSummaryDialog summary={summary} onClose={closeSummary} />}
       {healthCheckResult && <ExcelHealthCheckDialog result={healthCheckResult} onClose={() => setHealthCheckResult(null)} />}
+      {localeExportPreview && (
+        <LocaleExportPreviewDialog
+          preview={localeExportPreview}
+          onClose={() => setLocaleExportPreview(null)}
+          onDownloadCsv={downloadLocaleExportCsv}
+          onDownloadXlsx={downloadLocaleExportXlsx}
+        />
+      )}
     </main>
   );
 }
@@ -1316,6 +1502,8 @@ function StatusBar({ status, plans, previewRows }: { status: StatusKind; plans: 
         ? "生成预览中..."
         : status === "importing"
           ? "导入中..."
+          : status === "exporting"
+            ? "导出预览中..."
           : "就绪";
 
   return (
@@ -1344,13 +1532,21 @@ function OperationDialog({ status }: { status: StatusKind }) {
   }
 
   const title =
-    status === "reading" ? "导入 Excel" : status === "previewing" ? "生成写入预览" : "写入文件";
+    status === "reading"
+      ? "导入 Excel"
+      : status === "previewing"
+        ? "生成写入预览"
+        : status === "exporting"
+          ? "生成导出预览"
+          : "写入文件";
   const detail =
     status === "reading"
       ? "正在读取工作簿并解析表头。"
       : status === "previewing"
         ? "正在比较 Excel 内容和现有 locale 文件。"
-        : "正在把预览中的变更写入项目。";
+        : status === "exporting"
+          ? "正在读取当前项目的多语言文件并整理为表格。"
+          : "正在把预览中的变更写入项目。";
 
   return (
     <Dialog open aria-live="polite" aria-labelledby="operation-dialog-title">
@@ -1413,6 +1609,132 @@ function ExcelHealthCheckDialog({ result, onClose }: { result: ExcelHealthCheckR
       </DialogActions>
     </Dialog>
   );
+}
+
+function LocaleExportPreviewDialog({
+  preview,
+  onClose,
+  onDownloadCsv,
+  onDownloadXlsx
+}: {
+  preview: LocaleExportPreview;
+  onClose: () => void;
+  onDownloadCsv: () => void;
+  onDownloadXlsx: () => void;
+}) {
+  return (
+    <Dialog open onClose={onClose} maxWidth="xl" fullWidth aria-labelledby="locale-export-preview-title">
+      <DialogTitle id="locale-export-preview-title">多语言导出预览</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2}>
+          <Stack className="meta exportMeta" direction="row" spacing={2}>
+            <span>行数：{preview.rows.length}</span>
+            <span>文件：{preview.fileCount}</span>
+            <span>模块：{preview.modules.length > 0 ? preview.modules.join(", ") : "全部"}</span>
+            {preview.missingFiles.length > 0 && <span>缺失文件：{preview.missingFiles.length}</span>}
+          </Stack>
+          {preview.missingFiles.length > 0 && (
+            <Alert severity="warning">
+              有 {preview.missingFiles.length} 个文件不存在，已跳过。可检查路径模板、语言列配置或只导出模块。
+            </Alert>
+          )}
+          <div className="tableWrap exportPreviewTable">
+            <table>
+              <thead>
+                <tr>{preview.headers.map((header) => <th key={header}>{header}</th>)}</tr>
+              </thead>
+              <tbody>
+                {preview.rows.map((row, index) => (
+                  <tr key={index}>
+                    {preview.headers.map((header) => <td key={header}>{row[header]}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onDownloadCsv} variant="outlined">下载 CSV</Button>
+        <Button onClick={onDownloadXlsx} variant="outlined">下载 XLSX</Button>
+        <Button onClick={onClose} variant="contained">完成</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function getLocaleExportHeaders(keyColumn: string, languageColumns: LanguageColumns): string[] {
+  return [keyColumn, ...Object.values(languageColumns).filter((column) => column.trim())];
+}
+
+function buildXcstringsExportRows(
+  locale: LocaleObject,
+  keyColumn: string,
+  languageColumns: LanguageColumns,
+  moduleFilter: string[]
+): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = [];
+  Object.entries(locale).forEach(([key, value]) => {
+    const moduleName = key.split(".").filter(Boolean)[0] ?? "";
+    if (moduleFilter.length > 0 && !moduleFilter.includes(moduleName)) return;
+    const row: Record<string, string> = { [keyColumn]: key };
+    Object.entries(languageColumns).forEach(([lang, column]) => {
+      if (!column.trim()) return;
+      row[column] = isLocaleObject(value) && !isLocaleObject(value[lang]) ? String(value[lang] ?? "") : "";
+    });
+    rows.push(row);
+  });
+  return rows;
+}
+
+function buildLocaleExportRows(
+  localeByLanguage: Record<string, Record<string, LocaleObject>>,
+  keyColumn: string,
+  languageColumns: LanguageColumns,
+  options: { templateSplitsFiles: boolean; moduleFilter: string[]; removeModulePrefix: boolean }
+): Array<Record<string, string>> {
+  const rowsByKey = new Map<string, Record<string, string>>();
+
+  Object.entries(languageColumns).forEach(([lang, column]) => {
+    if (!lang.trim() || !column.trim()) return;
+    Object.entries(localeByLanguage[lang] ?? {}).forEach(([moduleName, locale]) => {
+      flattenLocaleValues(locale).forEach(([localeKey, value]) => {
+        const exportKey = getLocaleExportKey(moduleName, localeKey, options);
+        const exportModuleName = moduleName || exportKey.split(".").filter(Boolean)[0] || "";
+        if (options.moduleFilter.length > 0 && !options.moduleFilter.includes(exportModuleName)) return;
+        const row = rowsByKey.get(exportKey) ?? { [keyColumn]: exportKey };
+        row[column] = value;
+        rowsByKey.set(exportKey, row);
+      });
+    });
+  });
+
+  return Array.from(rowsByKey.values()).map((row) => {
+    Object.values(languageColumns).forEach((column) => {
+      if (column.trim() && row[column] == null) row[column] = "";
+    });
+    return row;
+  });
+}
+
+function getLocaleExportKey(
+  moduleName: string,
+  localeKey: string,
+  options: { templateSplitsFiles: boolean; removeModulePrefix: boolean }
+): string {
+  if (!options.templateSplitsFiles || !moduleName || options.removeModulePrefix) return localeKey;
+  return localeKey ? `${moduleName}.${localeKey}` : moduleName;
+}
+
+function flattenLocaleValues(locale: LocaleObject, prefix = ""): Array<[string, string]> {
+  return Object.entries(locale).flatMap(([key, value]) => {
+    const nextKey = prefix ? `${prefix}.${key}` : key;
+    return isLocaleObject(value) ? flattenLocaleValues(value, nextKey) : [[nextKey, String(value ?? "")]];
+  });
+}
+
+function getSafeDownloadName(value: string): string {
+  return (value.trim() || "i18n-export").replace(/[\\/:*?"<>|]+/g, "-");
 }
 
 function parseModuleFilter(value: string): string[] {
@@ -1641,44 +1963,28 @@ function buildDiffRows(edits: DiffEdit[]): DiffRow[] {
 
     const deletes = block.filter((item): item is Extract<DiffEdit, { kind: "delete" }> => item.kind === "delete");
     const inserts = block.filter((item): item is Extract<DiffEdit, { kind: "insert" }> => item.kind === "insert");
-    const pairCount = Math.max(deletes.length, inserts.length);
 
-    for (let pairIndex = 0; pairIndex < pairCount; pairIndex += 1) {
-      const removed = deletes[pairIndex];
-      const added = inserts[pairIndex];
-      if (removed && added) {
-        rows.push({
-          kind: "row",
-          rowKind: "replace",
-          oldLineNumber: removed.oldLineNumber,
-          newLineNumber: added.newLineNumber,
-          oldText: removed.text,
-          newText: added.text
-        });
-        continue;
-      }
-      if (removed) {
-        rows.push({
-          kind: "row",
-          rowKind: "delete",
-          oldLineNumber: removed.oldLineNumber,
-          newLineNumber: null,
-          oldText: removed.text,
-          newText: ""
-        });
-        continue;
-      }
-      if (added) {
-        rows.push({
-          kind: "row",
-          rowKind: "insert",
-          oldLineNumber: null,
-          newLineNumber: added.newLineNumber,
-          oldText: "",
-          newText: added.text
-        });
-      }
-    }
+    deletes.forEach((removed) => {
+      rows.push({
+        kind: "row",
+        rowKind: "delete",
+        oldLineNumber: removed.oldLineNumber,
+        newLineNumber: null,
+        oldText: removed.text,
+        newText: ""
+      });
+    });
+
+    inserts.forEach((added) => {
+      rows.push({
+        kind: "row",
+        rowKind: "insert",
+        oldLineNumber: null,
+        newLineNumber: added.newLineNumber,
+        oldText: "",
+        newText: added.text
+      });
+    });
   }
 
   return rows;
@@ -1932,6 +2238,15 @@ async function getBrowserFileHandle(
   }
 
   return cursor.getFileHandle(parts[parts.length - 1], { create });
+}
+
+async function getBrowserDirectoryHandle(directory: WebDirectoryHandle, relativePath: string): Promise<WebDirectoryHandle> {
+  const parts = normalizeRelativePath(relativePath).split("/").filter(Boolean);
+  let cursor = directory;
+  for (const part of parts) {
+    cursor = await cursor.getDirectoryHandle(part, { create: false });
+  }
+  return cursor;
 }
 
 function normalizeRelativePath(path: string): string {
